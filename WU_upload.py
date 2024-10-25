@@ -6,7 +6,6 @@ import requests        # Allows you to send HTTP/1.1 requests
 import WU_credentials  # Weather underground password, station IDs and API key
 import weatherData_cls # class to hold weather data for the Davis ISS station
 
-
 # This function uploads the weather data to Weather Underground
 # weatherData parameter is an instance of the weatherStation class in weather_Data_cls.py
 # stationID is the Weather Underground station ID
@@ -15,8 +14,8 @@ def upload2WU(weatherData, stationID):
     # create strings to hold various parts of upload URL
     WU_url = "https://rtupdate.wunderground.com/weatherstation/updateweatherstation.php?"
     WU_creds = 'ID={}&PASSWORD={}'.format(stationID, WU_credentials.WU_PASSWORD)
-    WU_software = "&softwaretype=RPi-Moteino"
-    WU_action = "&action=updateraw&realtime=1"          # &rtfreq=" + str(UploadFreqSeconds)
+    WU_software = "&softwaretype=RaspberryPi"
+    WU_action = "&action=updateraw&realtime=1&rtfreq=5"          # &rtfreq=" + str(UploadFreqSeconds)
 
     # Assemble URL to send to WU
     full_URL = WU_url + WU_creds + "&dateutc=now" 
@@ -53,6 +52,7 @@ def upload2WU(weatherData, stationID):
         # If uploaded successfully, website will reply with 200
         if r.status_code == 200:
             return([True, "No Errors"])
+
         else:
             uploadErrMsg = "HTTP Response:{},  {}".format(r.status_code, r.text)
             return([False, uploadErrMsg])

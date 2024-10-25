@@ -1,4 +1,4 @@
-# Decode Davis Weather Station data from wireless ISS weather station
+ # Decode Davis Weather Station data from wireless ISS weather station
 
 # MSB in first byte that dictates what data is sent in bytes 3-4
 ISS_CAP_VOLTS    = 0x2
@@ -16,7 +16,6 @@ SENSOR_OFFLINE   = 0xFF
 ERR_WRONG_PACKET = -100
 ERR_OUT_OF_RANGE = -101
 ERR_INVALID_DATA = -102
-
 
 # ---------------------------------------------------------------------------------------------
 # Davis station ID
@@ -84,8 +83,8 @@ def rainCounter(rawData):
 
     if (rainCntr < 0 or rainCntr > 127): # check for valid range
         return(ERR_OUT_OF_RANGE)
-    
-    return (rainCntr) 
+
+    return (rainCntr)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -103,7 +102,7 @@ def rainInch(rawData):
     if (rainCountInch < 0 or rainCountInch > 1.27): # check for valid range
         return(ERR_OUT_OF_RANGE)
     
-    return (rainCountInch) 
+    return (rainCountInch)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -130,7 +129,7 @@ def windSpeed(rawData):
 
     if (speed < 0 or speed > 240): # check for valid range
         return(ERR_OUT_OF_RANGE)
-        
+
     return (speed)
 
 
@@ -144,7 +143,7 @@ def windGusts(rawData):
     gust = rawData[3]
     if (gust < 0 or gust > 240): # check for valid range
          return(ERR_OUT_OF_RANGE)
-        
+
     return (gust)
 
 
@@ -240,7 +239,7 @@ def capVoltage(rawData):
 
     if (volts < 0 or volts > 10): # check for valid range
         return(ERR_OUT_OF_RANGE)
-        
+
     return (volts)
     
 
