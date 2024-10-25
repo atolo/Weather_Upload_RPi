@@ -6,7 +6,7 @@
 #  WU doc on API for current conditions: https://docs.google.com/document/d/1KGb8bTVYRsNgljnNH67AMhckY8AQT2FVwZ9urj8SWBs/edit#
 #
 
-WU_STATIONS = ["KVTDOVER19", "KVTWESTD4", "KVTDOVER25"]  # nearby weather station IDs to get pressure data
+WU_STATIONS = ["KFLDELAN189", "KFLDELAN198", "KFLDELAN177"]  # nearby weather station IDs to get pressure data
 
 import requests        # Allows you to send HTTP/1.1 requests
 import WU_credentials  # Weather underground password, station IDs and API key
