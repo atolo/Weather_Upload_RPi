@@ -40,7 +40,7 @@ def batteryStatus(rawData):
 def rainRate(rawData):
     #Verify packet contains rain rate data
     if (rawData[0] >> 4) != ISS_RAIN_SECONDS:
-        return (-100)  ## Wrong packet type - doesn't contain rain rate seconds
+        return (ERR_WRONG_PACKET)  ## Wrong packet type - doesn't contain rain rate seconds
 
     if ( rawData[4] & 0x40 == 0 ):
         rainRateSeconds =  (rawData[3] >> 4) + rawData[4] - 1         # Light rain
