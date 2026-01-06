@@ -33,6 +33,10 @@ NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
 SERIAL_BAUDRATE = 4800  # Davis weather station baud rate
 SERIAL_TIMEOUT = 3  # Serial port read timeout in seconds
 
+# CRC / serial recovery settings
+CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
+CRC_RESET_COOLDOWN = 60            # seconds to wait between serial reset attempts
+
 ISS_STATION_ID = 1
 WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
 # WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
@@ -369,17 +373,8 @@ def logFileDetail():
 ##                     perfStats]
 ##    print("{}  {}".format(detailLogData, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
-    detailLogOutput = "{}\t{}\t{}\t{}\t{}\t{:0.1f}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(
-                                   suntec.gotDewPointData(),
-                                   lastUploadMin,
-                                   minSinceLastNewISSData,
-                                   perfStats[STAT_UPLOADS],
-                                   perfStats[STAT_HTTP_FAIL],
-                                   perfStats[STAT_ISS_SUCCESS],
-                                   perfStats[STAT_ISS_FAIL],
-                                   g_rawDataNew,
-                                   time.strftime("%m/%d/%Y %I:%M:%S %p")
-                                )
+    # Build a safe, tab-separated log line. Keep fields minimal to avoid format errors.
+    detailLogOutput = f"{suntec.gotDewPointData()}\t{lastUploadMin}\t{minSinceLastNewISSData}\t{perfStats[STAT_UPLOADS]}\t{perfStats[STAT_HTTP_FAIL]}\t{perfStats[STAT_ISS_SUCCESS]}\t{perfStats[STAT_ISS_FAIL]}\t{g_rawDataNew}\t{time.strftime('%m/%d/%Y %I:%M:%S %p')}"
     print(detailLogOutput)
 
 
@@ -403,6 +398,32 @@ def printWirelessData():
 def flush_input_buffer():
     ser.reset_input_buffer()
     time.sleep(0.1)  # Short delay to ensure buffer is cleared
+
+
+def reset_serial_port():
+    """Try progressively stronger serial recovery: flush, then close+reopen.
+    Keeps `ser` in module scope and handles exceptions gracefully."""
+    global ser, g_crc_last_reset
+    try:
+        print("Attempting serial flush and reset")
+        try:
+            ser.reset_input_buffer()
+        except Exception as e:
+            print(f"flush_input_buffer() failed: {e}")
+        # Try a full reopen
+        try:
+            ser.close()
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            ser = serial.Serial(port=ser.port, baudrate=SERIAL_BAUDRATE, timeout=SERIAL_TIMEOUT)
+            print("Serial port reopened successfully")
+        except Exception as e:
+            print(f"Failed to reopen serial port: {e}")
+        g_crc_last_reset = time.time()
+    except Exception as e:
+        print(f"Exception in reset_serial_port(): {e}")
 
 
 #---------------------------------------------------------------------
@@ -454,6 +475,8 @@ g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable,
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
 hourTimer = time.time() + 3600
+g_crc_fail_count = 0   # consecutive CRC failure counter
+g_crc_last_reset = 0.0 # timestamp of last serial reset
 
 
 # List positions for perfStats[] list
@@ -485,12 +508,37 @@ try:
                     decodeStatus, decodeMessage = decodeRawData(g_rawDataNew)
                     if decodeStatus:
                         perfStats[STAT_ISS_SUCCESS] += 1
+                        # reset consecutive CRC failure counter on successful decode
+                        g_crc_fail_count = 0
                         print(f"Successfully decoded: {decodeMessage}")
                     else:
                         errMsg = f"Error decoding ISS packet data: {decodeMessage}"
                         print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
                         print(f"Problematic packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
                         perfStats[STAT_ISS_FAIL] += 1
+                        # Track CRC-specific failures and attempt recovery when threshold reached
+                        try:
+                            if isinstance(decodeMessage, str) and ("CRC" in decodeMessage or "Invalid CRC" in decodeMessage):
+                                g_crc_fail_count += 1
+                                print(f"Consecutive CRC failures: {g_crc_fail_count}")
+                            else:
+                                g_crc_fail_count = 0
+                        except Exception:
+                            g_crc_fail_count = 0
+
+                        # If CRC failures accumulate, attempt to flush/reopen serial
+                        if g_crc_fail_count >= CRC_FAIL_THRESHOLD and (time.time() - g_crc_last_reset) > CRC_RESET_COOLDOWN:
+                            print(f"CRC failure threshold reached ({g_crc_fail_count}), attempting serial reset")
+                            try:
+                                flush_input_buffer()
+                            except Exception as e:
+                                print(f"flush_input_buffer() error: {e}")
+                            try:
+                                reset_serial_port()
+                            except Exception as e:
+                                print(f"reset_serial_port() error: {e}")
+                            # reset counter after an attempt
+                            g_crc_fail_count = 0
                 else:
                     print("Incomplete packet received")
                     flush_input_buffer()
@@ -546,7 +594,10 @@ try:
 
         # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
         if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > NO_UPLOAD_THRESHOLD)):
-            logFileDetail()
+            try:
+                logFileDetail()
+            except Exception as e:
+                print(f"Error in logFileDetail(): {e}")
             detailStatTimer = time.time() + DETAIL_STATS_INTERVAL # reset timer
 
         # Every hour print and then reset some stats for debugging
