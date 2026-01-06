@@ -114,7 +114,7 @@ class weatherStation:
 
         numPoints = weatherStation.AVG_WIND_DIR_NUM_DATA_POINTS
         
-        # Put first 30 data pionts in lists
+        # Put first 30 data points in lists
         if self.c < numPoints:
             self.northSouth[self.c] = math.cos(math.radians(windDirNow))
             self.eastWest[self.c]   = math.sin(math.radians(windDirNow))
@@ -123,12 +123,12 @@ class weatherStation:
 
         # Lists are full, can calculate average now
         if self.c >= numPoints:
-            # Shift oldest reading out 
-            self.northSouth = list(self.northSouth[1:numPoints]) 
-            self.eastWest   = list(self.eastWest[1:numPoints])
-            # Append new wind direction to end of list
+            # Shift oldest reading out and append new value
+            self.northSouth.pop(0)
+            self.eastWest.pop(0)
             self.northSouth.append(math.cos(math.radians(windDirNow)))
             self.eastWest.append(math.sin(math.radians(windDirNow)))
+            
             # Sum the 2 lists
             sumNorthSouth = sum(self.northSouth)
             sumEastWest   = sum(self.eastWest)
@@ -166,6 +166,6 @@ class weatherStation:
             self.windChill = (self.outsideTemp * 0.6215) - (35.75 * self.windSpeed**0.16) + (0.4275 * self.outsideTemp * self.windSpeed**0.16) + 35.74
             return(self.windChill)
         else:
-            suntec.windChill = self.outsideTemp
+            self.windChill = self.outsideTemp
             return (weatherStation.NO_DATA_YET)
 

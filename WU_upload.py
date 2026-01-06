@@ -9,13 +9,14 @@ import weatherData_cls # class to hold weather data for the Davis ISS station
 # This function uploads the weather data to Weather Underground
 # weatherData parameter is an instance of the weatherStation class in weather_Data_cls.py
 # stationID is the Weather Underground station ID
+# uploadFreq is the upload frequency in seconds
 # Note, if you don't send WU temperature and dewpoint, it will assume zero
-def upload2WU(weatherData, stationID):
+def upload2WU(weatherData, stationID, uploadFreq=5):
     # create strings to hold various parts of upload URL
     WU_url = "https://rtupdate.wunderground.com/weatherstation/updateweatherstation.php?"
     WU_creds = 'ID={}&PASSWORD={}'.format(stationID, WU_credentials.WU_PASSWORD)
     WU_software = "&softwaretype=RaspberryPi"
-    WU_action = "&action=updateraw&realtime=1&rtfreq=5"          # &rtfreq=" + str(UploadFreqSeconds)
+    WU_action = "&action=updateraw&realtime=1&rtfreq={}".format(uploadFreq)
 
     # Assemble URL to send to WU
     full_URL = WU_url + WU_creds + "&dateutc=now" 
@@ -83,6 +84,6 @@ def upload2WU(weatherData, stationID):
         uploadErrMsg = "Timeout"
         return([False, uploadErrMsg])
 
-    except Exception:
-        uploadErrMsg = "Other"
+    except Exception as e:
+        uploadErrMsg = f"Unexpected error: {e}"
         return([False, uploadErrMsg])

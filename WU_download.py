@@ -6,14 +6,16 @@
 #  WU doc on API for current conditions: https://docs.google.com/document/d/1KGb8bTVYRsNgljnNH67AMhckY8AQT2FVwZ9urj8SWBs/edit#
 #
 
-WU_STATIONS = ["KFLDELAN189", "KFLDELAN198", "KFLDELAN177"]  # nearby weather station IDs to get pressure data
-
 import requests        # Allows you to send HTTP/1.1 requests
 import WU_credentials  # Weather underground password, station IDs and API key
 import time
 
+# Constants
 ERR_INVALID_DATA = -102
 ERR_FAILED_GET   = -103
+MIN_VALID_PRESSURE_INHG = 25.0  # Minimum valid pressure reading in inches of Hg
+
+WU_STATIONS = WU_credentials.WU_LOCAL_STATIONS  # nearby weather station IDs to get pressure data
 
 
 # Get daily rain data from Suntec station.  Need this on reboot of RPi
@@ -39,8 +41,8 @@ def getDailyRain():
         errMsg = "Invalid HTTP response length"
         return([ERR_INVALID_DATA, errMsg])
 
-    except Exception:
-        errMsg = "Failed get() request"
+    except Exception as e:
+        errMsg = f"Failed get() request: {e}"
         return([ERR_FAILED_GET, errMsg])
         
 def getPressure():
@@ -56,7 +58,7 @@ def getPressure():
                 if isNumber(response['observations'][0]['imperial']['pressure']):
                     nearby_pressure = float(response['observations'][0]['imperial']['pressure'])
                     nearby_last_update_time = int(response['observations'][0]['epoch'])
-                    if (nearby_pressure) > 25: # a pressure less than 25 inHg isn't valid
+                    if (nearby_pressure) > MIN_VALID_PRESSURE_INHG: # a pressure less than MIN_VALID_PRESSURE_INHG inHg isn't valid
                         return(nearby_pressure)
 
             # Didn't get a valid pressure. Try the next station in WU_STATIONS tuple
@@ -66,8 +68,8 @@ def getPressure():
             i = i + 1
             time.sleep(10)
 
-        except Exception:
-            print("Error in getPressure(), failed get() request for station {}".format(WU_STATIONS[i]))
+        except Exception as e:
+            print(f"Error in getPressure(), failed get() request for station {WU_STATIONS[i]}: {e}")
             i = i + 1
             if (i >= len(WU_STATIONS)):
                 return(ERR_FAILED_GET)

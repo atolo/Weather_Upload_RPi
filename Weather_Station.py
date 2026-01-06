@@ -23,7 +23,15 @@ import weatherData_cls # class to hold weather data for the Davis ISS station
 from subprocess import check_output # used to print RPi IP address
 import serial
 
+# Configuration constants
 debug = True
+ELEVATION_METERS = 26  # Replace with your actual elevation in meters
+MIN_VALID_PRESSURE_INHG = 25.0  # Minimum valid pressure reading in inches of Hg
+UPLOAD_FREQUENCY_SECONDS = 5  # Seconds between uploads to Weather Underground
+DETAIL_STATS_INTERVAL = 60  # Seconds between detail stats logging
+NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
+SERIAL_BAUDRATE = 4800  # Davis weather station baud rate
+SERIAL_TIMEOUT = 3  # Serial port read timeout in seconds
 
 ISS_STATION_ID = 1
 WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
@@ -46,9 +54,21 @@ ISS_RAIN_COUNT   = 0xE
 # Configure the serial port
 ser = serial.Serial(
     port='/dev/serial0',  # Replace with your serial port
-    baudrate=4800,  # Replace with your baud rate
-    timeout=3  # Timeout for read
+    baudrate=SERIAL_BAUDRATE,
+    timeout=SERIAL_TIMEOUT
 )
+
+# Initialize BME280 sensor once at startup
+try:
+    i2c = board.I2C()  # uses board.SCL and board.SDA
+    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
+    bme280.sea_level_pressure = 1013.25
+    bme280_initialized = True
+    print("BME280 sensor initialized successfully")
+except Exception as e:
+    bme280_initialized = False
+    bme280 = None
+    print(f"Warning: Failed to initialize BME280 sensor: {e}")
 
 #---------------------------------------------------------------------
 # Validate weather data from wireless packet
@@ -72,9 +92,9 @@ def decodeRawData(packet):
     if (newWindSpeed >= 0):
         suntec.windSpeed = newWindSpeed
     else:
-        errmsg = 'Error exrtacting wind speed from packet. Got {} from {}'.format(newWindSpeed, packet) 
+        errmsg = 'Error extracting wind speed from packet. Got {} from {}'.format(newWindSpeed, packet) 
         suntec.windSpeed  = 0
-        return[False, errmsg] # error extracing wind speed, stop processing packet
+        return[False, errmsg] # error extracting wind speed, stop processing packet
     
     # Wind direction is in every packet
     newWindDir = WU_decodeData.windDirection(packet)
@@ -82,8 +102,8 @@ def decodeRawData(packet):
         suntec.windDir = newWindDir
         suntec.avgWindDir(newWindDir)
     else:
-        errmsg = 'Error exrtacting wind direction from packet. Got {} from {}'.format(newWindDir, packet) 
-        return[False, errmsg] # Error extracing wind direction, stop processing packet
+        errmsg = 'Error extracting wind direction from packet. Got {} from {}'.format(newWindDir, packet) 
+        return[False, errmsg] # Error extracting wind direction, stop processing packet
     
     # Extract the data type from the packet header
     dataSent = packet[0] >> 4
@@ -157,7 +177,7 @@ def decodeRawData(packet):
         if newWindGust >= 0:
             suntec.windGust = newWindGust
             return (True, "Wind gust data processed")
-        print('Invalid wind gust. Got {} from {}'.format(newWindGuest, packet))
+        print('Invalid wind gust. Got {} from {}'.format(newWindGust, packet))
         return (False, "Invalid wind gust")
 
     elif dataSent == ISS_HUMIDITY:
@@ -190,7 +210,7 @@ def decodeRawData(packet):
         # Handle solar radiation data
         solarRad = WU_decodeData.solarRadiation(packet)
         if solarRad >= 0:
-            suntec.solarRadiation = solarRad
+            suntec.solar = solarRad
             return (True, "Solar radiation data processed")
         else:
             print(f'Invalid solar radiation. Got {solarRad} from {packet}')
@@ -216,24 +236,28 @@ def decodeRawData(packet):
 #---------------------------------------------------------------------
 def getAtmosphericPressure():
 
-    # Create sensor object, using the board's default I2C bus.
-    i2c = board.I2C()  # uses board.SCL and board.SDA
-    # i2c = board.STEMMA_I2C()  # For using the built-in STEMMA QT connector on a microcontroller
-    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
+    if not bme280_initialized or bme280 is None:
+        print("BME280 sensor not initialized")
+        return -1
     
-    # change this to match the location's pressure (hPa) at sea level
-    bme280.sea_level_pressure = 1013.25
-    
-    # Define the elevation in meters
-    elevation = 26  # Replace with your actual elevation in meters
-    pressure_pascals = bme280.pressure  # Pressure in Pascals
-    # Convert raw pressure to sea level pressure in millibars
-    pressure_millibars = ((pressure_pascals * 100.0) / ((1 - (elevation / 44330.0)) ** 5.255)) / 100.0
-    # Convert sea level pressure to inches of mercury
-    pressure_inches = (pressure_millibars * 0.0002953) * 100
-    rounded_pressure_inches = round(pressure_inches, 2)
-    
-    return(rounded_pressure_inches)
+    try:
+        # Define the elevation in meters
+        elevation = ELEVATION_METERS
+        # BME280 returns pressure in hPa (hectopascals), where 1 hPa = 1 millibar
+        pressure_hpa = bme280.pressure
+        
+        # Adjust to sea level pressure using barometric formula
+        # Formula: P_sea = P_station / (1 - h/44330)^5.255
+        pressure_sea_level_mb = pressure_hpa / ((1 - (elevation / 44330.0)) ** 5.255)
+        
+        # Convert millibars to inches of mercury (1 mb = 0.02953 inHg)
+        pressure_inches = pressure_sea_level_mb * 0.02953
+        rounded_pressure_inches = round(pressure_inches, 2)
+        
+        return(rounded_pressure_inches)
+    except Exception as e:
+        print(f"Error reading BME280 sensor: {e}")
+        return -1
 
 #---------------------------------------------------------------------
 # Prints uploaded weather data
@@ -271,7 +295,7 @@ def printWeatherDataTable(printRawData=None):
 # midnight every day, and sometimes when program is restarted.
 # If newFile = False, then data should be appended to existing file; 'a" parameter in open().
 #
-# logType is eather "Data" or "Error"
+# logType is either "Data" or "Error"
 #
 # logData is data to be appended to the log file
 #---------------------------------------------------------------------
@@ -284,32 +308,28 @@ def logFile(newFile, logType, logData):
         # Create new data log file
         if not os.path.exists(datafilename):
             # If data log doesn't exist, create it and add header
-            datalog = open(datafilename, "w")
-            strHeader =  "temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp\n"
-            datalog.write(strHeader)
-            datalog.close()             
+            with open(datafilename, "w") as datalog:
+                strHeader =  "temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp\n"
+                datalog.write(strHeader)
             
         # Create new error log file
         if not os.path.exists(errorfilename):
             # If error log doesn't exist, create it and add header
-            errlog = open(errorfilename, "w")
-            strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tISS Err\tISS Avg Min\tISS Age\ttime stamp\n"
-            errlog.write(strErrHeader)
-            errlog.close()             
+            with open(errorfilename, "w") as errlog:
+                strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tISS Err\tISS Avg Min\tISS Age\ttime stamp\n"
+                errlog.write(strErrHeader)             
 
     else: # append data to existing log file
         if(logType == "Data"):
             # log type is data log
-            datalog = open(datafilename, "a")
-            datalog.write(logData)
-            datalog.write('\n') # Add eol character
-            datalog.close()             
+            with open(datafilename, "a") as datalog:
+                datalog.write(logData)
+                datalog.write('\n') # Add eol character
 
         else: # log type is error log
-            errlog = open(errorfilename, "a")
-            errlog.write(logData)
-            errlog.write(time.strftime("%m/%d/%Y %I:%M:%S %p\n"))  # Add timestamp and eol character
-            errlog.close()             
+            with open(errorfilename, "a") as errlog:
+                errlog.write(logData)
+                errlog.write(time.strftime("%m/%d/%Y %I:%M:%S %p\n"))  # Add timestamp and eol character             
         
 
 #---------------------------------------------------------------------
@@ -328,7 +348,7 @@ def logFile(newFile, logType, logData):
 ##    - ISS Fail
 ##    - ISS Success
 #---------------------------------------------------------------------
-detailStatTimer = time.time() + 60  # global variable to print logFileDetail every minute if no w/u uploads
+detailStatTimer = time.time() + DETAIL_STATS_INTERVAL  # global variable to print logFileDetail every minute if no w/u uploads
 def logFileDetail():
 
     lastUploadMin = round((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/20,2)  # minutes since last W/U upload
@@ -357,10 +377,9 @@ def logFileDetail():
 
 
     detailErrFilename = "Logs/Detail Error log.txt"
-    detErrlog = open(detailErrFilename, "a")
-    detErrlog.write(detailLogOutput)
-    detErrlog.write('\n')    
-    detErrlog.close()
+    with open(detailErrFilename, "a") as detErrlog:
+        detErrlog.write(detailLogOutput)
+        detErrlog.write('\n')
 
 
 #---------------------------------------------------------------------
@@ -409,7 +428,7 @@ else:
 
 # Get pressure from other nearby weather stations
 newPressure = getAtmosphericPressure()
-if newPressure > 25:
+if newPressure > MIN_VALID_PRESSURE_INHG:
    suntec.pressure = newPressure
 else:
    errMsg = "Error getting pressure data on startup"
@@ -421,10 +440,9 @@ g_SMS_Sent_Today = False  # flag so SMS is only sent once a day
 g_SMS_Offline_Msg_Sent = False # flag so SMS is offline message is only sent once
 g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
 g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
-g_rawDataNew = [0.0] * 8 # Initialize rawData list. This is weather data that's sent from Moteino
+g_rawDataNew = [0] * 8 # Initialize rawData list. This is weather data that's sent from serial
 g_TableHeaderCntr1 = 0 # Used to print header for weather data summary every so often
 g_i2cDailyErrors = 0 # Daily counter for I2C errors
-g_uploadFreqWU = 5 # Seconds between uploads to Weather Underground
 g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
@@ -447,95 +465,104 @@ perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance st
 # Main loop
 #---------------------------------------------------------------------
 
-while True:
+try:
+    while True:
 
-    decodeStatus = False # Reset status
-    
-    try:
-        # Wait until at least 8 bytes are available
-        if ser.in_waiting >= 8:
-            g_rawDataNew = ser.read(8)
-            if len(g_rawDataNew) == 8:
-                decodeStatus, decodeMessage = decodeRawData(g_rawDataNew)
-                if decodeStatus:
-                    perfStats[STAT_ISS_SUCCESS] += 1
-                    print(f"Successfully decoded: {decodeMessage}")
-                else:
-                    errMsg = f"Error decoding ISS packet data: {decodeMessage}"
-                    print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
-                    print(f"Problematic packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
-                    perfStats[STAT_ISS_FAIL] += 1
-            else:
-                print("Incomplete packet received")
-                flush_input_buffer()
-        else:
-            # add a small delay to prevent busy-waiting
-            time.sleep(0.1)
-    except serial.SerialTimeoutException:
-        print("Timeout occurred while reading serial data")
-        flush_input_buffer()
-    except serial.SerialException as e:
-        print(f"Serial error occurred: {e}")
-        flush_input_buffer()
-        time.sleep(1)  # Longer delay on error
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        print(f"Last packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
-    
- 
-    # If it's a new day, reset daily rain accumulation and I2C Error counter
-    newDayOfMonth = int(time.strftime("%d"))
-    if newDayOfMonth != g_oldDayOfMonth:
-        suntec.rainToday = 0.0
-        g_oldDayOfMonth = newDayOfMonth
-
-        # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
-        logFile(True, "Data",   "")
-        logFile(True, "Errors", "")
-
-
-    # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
-    # and R/H) then upload new data to Weather Underground
-    if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
-        newPressure = getAtmosphericPressure() # get latest pressure from bme280
-        if (newPressure > 25):
-            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
-        printWeatherDataTable(printRawData=False) # print weather data. printRawData parameter deterrmines if raw ISS hex data is also printed.
+        decodeStatus = False # Reset status
         
-        uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.
-        uploadErrMsg = uploadStatus[1]
-        # srg debug why uploads stop
-        if (time.time() > (perfStats[STAT_UPLOAD_TIMESTAMP] + 300) ):  # srg debug
-            print("(debug) HTTP Response: {}".format(uploadStatus))    # srg debug
-        if uploadStatus[0] == True:
-            perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
-            tmr_upload = time.time() + g_uploadFreqWU # Set next upload time
-            perfStats[STAT_UPLOADS] += 1
-            if (debug):
-                print("HTTP Response: {}".format(uploadStatus))
-        else:
-            errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
-            print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
-            perfStats[STAT_HTTP_FAIL] += 1
+        try:
+            # Wait until at least 8 bytes are available
+            if ser.in_waiting >= 8:
+                g_rawDataNew = ser.read(8)
+                if len(g_rawDataNew) == 8:
+                    decodeStatus, decodeMessage = decodeRawData(g_rawDataNew)
+                    if decodeStatus:
+                        perfStats[STAT_ISS_SUCCESS] += 1
+                        print(f"Successfully decoded: {decodeMessage}")
+                    else:
+                        errMsg = f"Error decoding ISS packet data: {decodeMessage}"
+                        print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+                        print(f"Problematic packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
+                        perfStats[STAT_ISS_FAIL] += 1
+                else:
+                    print("Incomplete packet received")
+                    flush_input_buffer()
+            else:
+                # add a small delay to prevent busy-waiting
+                time.sleep(0.1)
+        except serial.SerialTimeoutException:
+            print("Timeout occurred while reading serial data")
+            flush_input_buffer()
+        except serial.SerialException as e:
+            print(f"Serial error occurred: {e}")
+            flush_input_buffer()
+            time.sleep(1)  # Longer delay on error
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            print(f"Last packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
+        
+    
+        # If it's a new day, reset daily rain accumulation and I2C Error counter
+        newDayOfMonth = int(time.strftime("%d"))
+        if newDayOfMonth != g_oldDayOfMonth:
+            suntec.rainToday = 0.0
+            g_oldDayOfMonth = newDayOfMonth
 
-    # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
-    if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > 300)):
-        logFileDetail()
-        detailStatTimer = time.time() + 60 # reset timer
+            # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
+            logFile(True, "Data",   "")
+            logFile(True, "Errors", "")
 
-    # Every hour print and then reset some stats for debugging
-    if (time.time() > hourTimer):
-        stats = "   {}\t    {}\t\t  {:.2f}\t\t  {:.1f}%\t\t  {}\t  {:.2f}\t{:.1f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], 
-                                                                        (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/3600, 
-                                                                         perfStats[STAT_ISS_FAIL], perfStats[STAT_ISS_SUCCESS]/3600,
-                                                                         perfStats[STAT_NEW_ISS_TIMESTAMP]/60 )
-        logFile(False, "Error", stats)
 
-        # Reset hourly stats
-        perfStats[STAT_UPLOADS] = 0
-        perfStats[STAT_HTTP_FAIL] = 0
-        perfStats[STAT_ISS_SUCCESS] = 0
-        hourTimer = time.time() + 3600
-       
+        # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
+        # and R/H) then upload new data to Weather Underground
+        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.time() > tmr_upload)):
+            newPressure = getAtmosphericPressure() # get latest pressure from bme280
+            if (newPressure > MIN_VALID_PRESSURE_INHG):
+                suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
+            printWeatherDataTable(printRawData=False) # print weather data. printRawData parameter deterrmines if raw ISS hex data is also printed.
+            
+            uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.
+            uploadErrMsg = uploadStatus[1]
+            # srg debug why uploads stop
+            if (time.time() > (perfStats[STAT_UPLOAD_TIMESTAMP] + NO_UPLOAD_THRESHOLD) ):  # srg debug
+                print("(debug) HTTP Response: {}".format(uploadStatus))    # srg debug
+            if uploadStatus[0] == True:
+                perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
+                tmr_upload = time.time() + UPLOAD_FREQUENCY_SECONDS # Set next upload time
+                perfStats[STAT_UPLOADS] += 1
+                if (debug):
+                    print("HTTP Response: {}".format(uploadStatus))
+            else:
+                errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
+                print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
+                perfStats[STAT_HTTP_FAIL] += 1
+
+        # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
+        if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > NO_UPLOAD_THRESHOLD)):
+            logFileDetail()
+            detailStatTimer = time.time() + DETAIL_STATS_INTERVAL # reset timer
+
+        # Every hour print and then reset some stats for debugging
+        if (time.time() > hourTimer):
+            stats = "   {}\t    {}\t\t  {:.2f}\t\t  {}\t\t  {:.2f}\t  {:.2f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], 
+                                                                            (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/3600, 
+                                                                            perfStats[STAT_ISS_FAIL], perfStats[STAT_ISS_SUCCESS]/3600,
+                                                                            (time.time() - perfStats[STAT_NEW_ISS_TIMESTAMP])/60 )
+            logFile(False, "Error", stats)
+
+            # Reset hourly stats
+            perfStats[STAT_UPLOADS] = 0
+            perfStats[STAT_HTTP_FAIL] = 0
+            perfStats[STAT_ISS_SUCCESS] = 0
+            hourTimer = time.time() + 3600
+
+except KeyboardInterrupt:
+    print("\nShutting down gracefully...")
+    ser.close()
+    print("Serial port closed.")
+except Exception as e:
+    print(f"Fatal error in main loop: {e}")
+    ser.close()
+    raise
 
 
