@@ -58,17 +58,24 @@ ser = serial.Serial(
     timeout=SERIAL_TIMEOUT
 )
 
-# Initialize BME280 sensor once at startup
-try:
-    i2c = board.I2C()  # uses board.SCL and board.SDA
-    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
-    bme280.sea_level_pressure = 1013.25
-    bme280_initialized = True
-    print("BME280 sensor initialized successfully")
-except Exception as e:
-    bme280_initialized = False
+# Initialize BME280 sensor once at startup (retry a few times in case I2C not ready)
+bme280_initialized = False
+bme280 = None
+for attempt in range(5):
+    try:
+        i2c = board.I2C()  # uses board.SCL and board.SDA
+        bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c, address=0x76)
+        bme280.sea_level_pressure = 1013.25
+        bme280_initialized = True
+        print("BME280 sensor initialized successfully")
+        break
+    except Exception as e:
+        print(f"Warning: Failed to initialize BME280 sensor (attempt {attempt+1}/5): {e}")
+        time.sleep(1)
+
+if not bme280_initialized:
     bme280 = None
-    print(f"Warning: Failed to initialize BME280 sensor: {e}")
+    print("Warning: BME280 sensor not initialized after retries")
 
 #---------------------------------------------------------------------
 # Validate weather data from wireless packet
