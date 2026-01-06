@@ -574,6 +574,9 @@ try:
             newPressure = getAtmosphericPressure() # get latest pressure from bme280
             if (newPressure > MIN_VALID_PRESSURE_INHG):
                 suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
+            else:
+                # BME280 did not return a valid pressure. Do not substitute from other stations; keep previous value.
+                print("BME280 pressure invalid or unavailable; omitting pressure from this upload and keeping previous value")
             printWeatherDataTable(printRawData=False) # print weather data. printRawData parameter deterrmines if raw ISS hex data is also printed.
             
             uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.
