@@ -6,11 +6,12 @@
 # 10/24/2024. Initial fork.
 # Added serial connection and removed i2c and moteino. Added BME280 and pressure calculations.
 
-version = "v1.31"
+version = "v1.32"
 
 import time
 #import smbus  # Used by I2C
 import os.path # used to see if a file exist
+import os
 import math # Used by humidity calculation
 import board
 from adafruit_bme280 import basic as adafruit_bme280
@@ -32,6 +33,7 @@ DETAIL_STATS_INTERVAL = 60  # Seconds between detail stats logging
 NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
 SERIAL_BAUDRATE = 4800  # Davis weather station baud rate
 SERIAL_TIMEOUT = 3  # Serial port read timeout in seconds
+LOG_RETENTION_DAYS = 7  # Delete dated log files older than this many days
 
 # CRC / serial recovery settings
 CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
@@ -312,10 +314,41 @@ def printWeatherDataTable(printRawData=None):
 #---------------------------------------------------------------------
 def logFile(newFile, logType, logData):
 
+    def prune_old_logs(retention_days):
+        if retention_days <= 0:
+            return
+
+        logs_dir = "Logs"
+        if not os.path.isdir(logs_dir):
+            return
+
+        cutoff_seconds = time.time() - (retention_days * 86400)
+        log_prefixes = ("Upload Data_", "Error log_")
+
+        for filename in os.listdir(logs_dir):
+            if not filename.endswith(".txt"):
+                continue
+            if not filename.startswith(log_prefixes):
+                continue
+
+            filepath = os.path.join(logs_dir, filename)
+            try:
+                file_mtime = os.path.getmtime(filepath)
+                if file_mtime < cutoff_seconds:
+                    os.remove(filepath)
+                    print(f"Deleted old log file: {filepath}")
+            except Exception as e:
+                print(f"Warning: Failed to prune old log '{filepath}': {e}")
+
     datafilename =  "Logs/Upload Data_" + time.strftime("%y%m%d") + ".txt"
     errorfilename = "Logs/Error log_"   + time.strftime("%y%m%d") + ".txt"
 
     if (newFile == True):
+        os.makedirs("Logs", exist_ok=True)
+
+        # Remove old log files before creating today's files.
+        prune_old_logs(LOG_RETENTION_DAYS)
+
         # Create new data log file
         if not os.path.exists(datafilename):
             # If data log doesn't exist, create it and add header
