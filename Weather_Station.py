@@ -6,13 +6,14 @@
 # 10/24/2024. Initial fork.
 # Added serial connection and removed i2c and moteino. Added BME280 and pressure calculations.
 
-version = "v1.32"
+version = "v1.4"
 
 import time
 #import smbus  # Used by I2C
 import os.path # used to see if a file exist
 import os
 import math # Used by humidity calculation
+import json
 import board
 from adafruit_bme280 import basic as adafruit_bme280
 #import RPi.GPIO as GPIO # reads/writes GPIO pins
@@ -34,6 +35,9 @@ NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
 SERIAL_BAUDRATE = 4800  # Davis weather station baud rate
 SERIAL_TIMEOUT = 3  # Serial port read timeout in seconds
 LOG_RETENTION_DAYS = 7  # Delete dated log files older than this many days
+WATCHDOG_HEARTBEAT_SECONDS = 30
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WATCHDOG_STATUS_FILE = os.path.join(BASE_DIR, "Logs", "weather_status.json")
 
 # CRC / serial recovery settings
 CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
@@ -459,6 +463,35 @@ def reset_serial_port():
         print(f"Exception in reset_serial_port(): {e}")
 
 
+def write_watchdog_status(last_upload=None, last_error=None):
+    try:
+        os.makedirs(os.path.dirname(WATCHDOG_STATUS_FILE), exist_ok=True)
+
+        status = {}
+        if os.path.exists(WATCHDOG_STATUS_FILE):
+            try:
+                with open(WATCHDOG_STATUS_FILE, "r") as status_file:
+                    status = json.load(status_file)
+            except Exception:
+                status = {}
+
+        status["version"] = version
+        status["updated_at"] = time.time()
+        status["last_heartbeat"] = time.time()
+
+        if last_upload is not None:
+            status["last_successful_upload"] = last_upload
+
+        if last_error is not None:
+            status["last_upload_error"] = last_error
+            status["last_upload_error_at"] = time.time()
+
+        with open(WATCHDOG_STATUS_FILE, "w") as status_file:
+            json.dump(status, status_file)
+    except Exception as e:
+        print(f"Warning: could not update watchdog status file: {e}")
+
+
 #---------------------------------------------------------------------
 # Start up 
 #---------------------------------------------------------------------
@@ -522,6 +555,8 @@ STAT_ISS_FAIL = 5          # 5 - ISS Packet decode errors in last hour
 STAT_ISS_SUCCESS = 6       # 6 - Average time (seconds) to receive ISS packet in last hour
 STAT_NEW_ISS_TIMESTAMP = 7 # 7 - Timestamp of last time received NEW weather data.  Not reset every hour. This seems to be the main problem when uploads stop - Moteino keeps sending the same packet
 perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance stats
+watchdogHeartbeatTimer = time.time() + WATCHDOG_HEARTBEAT_SECONDS
+write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
 
 
 #---------------------------------------------------------------------
@@ -588,6 +623,10 @@ try:
         except Exception as e:
             print(f"An error occurred: {e}")
             print(f"Last packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
+
+        if time.time() >= watchdogHeartbeatTimer:
+            write_watchdog_status()
+            watchdogHeartbeatTimer = time.time() + WATCHDOG_HEARTBEAT_SECONDS
         
     
         # If it's a new day, reset daily rain accumulation and I2C Error counter
@@ -621,12 +660,14 @@ try:
                 perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
                 tmr_upload = time.time() + UPLOAD_FREQUENCY_SECONDS # Set next upload time
                 perfStats[STAT_UPLOADS] += 1
+                write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
                 if (debug):
                     print("HTTP Response: {}".format(uploadStatus))
             else:
                 errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
                 print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
                 perfStats[STAT_HTTP_FAIL] += 1
+                write_watchdog_status(last_error=uploadErrMsg)
 
         # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
         if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > NO_UPLOAD_THRESHOLD)):
