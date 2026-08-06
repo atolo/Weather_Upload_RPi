@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import subprocess
+import tempfile
 import time
 
 import requests
@@ -66,14 +67,50 @@ def load_json(path, default):
     try:
         with open(path, "r") as file_handle:
             return json.load(file_handle)
-    except Exception:
+    except Exception as exc:
+        # A file that exists but will not parse is a real fault, not an empty state.
+        # Returning the default makes evaluate_health() report missing timestamps, which
+        # escalates -- that is intended. Log it so the cause is visible rather than inferred.
+        print(f"WARNING: {path} exists but could not be parsed ({exc}); treating as empty")
         return default
 
 
-def save_json(path, payload):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as file_handle:
-        json.dump(payload, file_handle)
+def _atomic_write_json(path, payload):
+    """Write JSON via a temp file + os.replace so a reader never sees a partial file."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    handle_fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(handle_fd, "w") as temp_file:
+            json.dump(payload, temp_file)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)   # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def persist_state(state, hostname):
+    """consecutive_failures is the only thing carrying state between runs of this oneshot.
+    An unguarded write failure would abort main() before the increment landed, so every run
+    would reload the same value and the reboot threshold could never be reached -- the
+    watchdog would alert forever and never act. Fail loudly instead."""
+    try:
+        _atomic_write_json(WATCHDOG_STATE_FILE, state)
+        return True
+    except Exception as exc:
+        print(f"CRITICAL: could not persist watchdog state to {WATCHDOG_STATE_FILE}: {exc}")
+        send_mailgun_email(
+            f"Weather station watchdog state write FAILED on {hostname}",
+            f"The watchdog could not persist its own state and cannot escalate reliably.\n"
+            f"State file: {WATCHDOG_STATE_FILE}\n"
+            f"Error: {exc}\n",
+        )
+        return False
 
 
 def format_age(now, timestamp):
@@ -182,11 +219,11 @@ def main():
             reboot_body = body + "\nAction: reboot initiated by watchdog.\n"
             send_mailgun_email(reboot_subject, reboot_body)
             state["reboot_triggered"] = True
-            save_json(WATCHDOG_STATE_FILE, state)
+            persist_state(state, hostname)
             reboot_pi()
             return
 
-        save_json(WATCHDOG_STATE_FILE, state)
+        persist_state(state, hostname)
         return
 
     recovered = int(state.get("consecutive_failures", 0)) > 0
@@ -201,7 +238,7 @@ def main():
 
     state["consecutive_failures"] = 0
     state["reboot_triggered"] = False
-    save_json(WATCHDOG_STATE_FILE, state)
+    persist_state(state, hostname)
     print("Watchdog check passed")
 
 

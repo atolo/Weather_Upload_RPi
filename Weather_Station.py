@@ -14,6 +14,7 @@ import os.path # used to see if a file exist
 import os
 import math # Used by humidity calculation
 import json
+import tempfile
 import board
 from adafruit_bme280 import basic as adafruit_bme280
 #import RPi.GPIO as GPIO # reads/writes GPIO pins
@@ -472,6 +473,27 @@ def reset_serial_port():
         print(f"Exception in reset_serial_port(): {e}")
 
 
+def _atomic_write_json(path, payload):
+    """Write JSON via a temp file + os.replace so a reader never sees a partial file.
+    open(path, "w") truncates immediately, and the watchdog reads this file from another
+    process every 5 minutes -- a torn read there looks like a total station failure."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    handle_fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(handle_fd, "w") as temp_file:
+            json.dump(payload, temp_file)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)   # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 def write_watchdog_status(last_upload=None, last_error=None):
     try:
         os.makedirs(os.path.dirname(WATCHDOG_STATUS_FILE), exist_ok=True)
@@ -495,8 +517,7 @@ def write_watchdog_status(last_upload=None, last_error=None):
             status["last_upload_error"] = last_error
             status["last_upload_error_at"] = time.time()
 
-        with open(WATCHDOG_STATUS_FILE, "w") as status_file:
-            json.dump(status, status_file)
+        _atomic_write_json(WATCHDOG_STATUS_FILE, status)
     except Exception as e:
         print(f"Warning: could not update watchdog status file: {e}")
 
