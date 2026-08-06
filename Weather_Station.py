@@ -498,7 +498,7 @@ def _atomic_write_json(path, payload, mode=0o644):
         raise
 
 
-def write_watchdog_status(last_upload=None, last_error=None):
+def write_watchdog_status(last_upload=None, last_error=None, started_at=None):
     try:
         os.makedirs(os.path.dirname(WATCHDOG_STATUS_FILE), exist_ok=True)
 
@@ -513,6 +513,9 @@ def write_watchdog_status(last_upload=None, last_error=None):
         status["version"] = version
         status["updated_at"] = time.time()
         status["last_heartbeat"] = time.time()
+
+        if started_at is not None:
+            status["started_at"] = started_at
 
         if last_upload is not None:
             status["last_successful_upload"] = last_upload
@@ -606,7 +609,9 @@ STAT_ISS_SUCCESS = 6       # 6 - Average time (seconds) to receive ISS packet in
 STAT_NEW_ISS_TIMESTAMP = 7 # 7 - Timestamp of last time received NEW weather data.  Not reset every hour. This seems to be the main problem when uploads stop - Moteino keeps sending the same packet
 perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance stats
 watchdogHeartbeatTimer = time.time() + WATCHDOG_HEARTBEAT_SECONDS
-write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
+# Item 1: this used to write last_upload=<startup time>, claiming a successful upload that had
+# not happened. Any previously recorded last_successful_upload is left untouched.
+write_watchdog_status(started_at=time.time())
 
 
 #---------------------------------------------------------------------

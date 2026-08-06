@@ -22,6 +22,10 @@ MAX_FAILURES_BEFORE_REBOOT = int(os.getenv("WATCHDOG_MAX_FAILURES_BEFORE_REBOOT"
 ALERT_COOLDOWN_SECONDS = int(os.getenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", "1800"))
 BOOT_GRACE_SECONDS = int(os.getenv("WATCHDOG_BOOT_GRACE_SECONDS", "300"))
 REBOOT_ENABLED = os.getenv("WATCHDOG_REBOOT_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+# Item 1: a boolean latch was cleared by any single clean pass, so a station that looked
+# healthy for one cycle after a reboot could be rebooted again immediately. A timestamp
+# cannot be cleared by recovery.
+MIN_SECONDS_BETWEEN_REBOOTS = int(os.getenv("WATCHDOG_MIN_SECONDS_BETWEEN_REBOOTS", "21600"))
 
 def get_credential(attr_candidates, env_name):
     env_value = os.getenv(env_name, "").strip()
@@ -174,7 +178,7 @@ def send_mailgun_email(subject, body):
         return False
 
 
-def evaluate_health(status, now):
+def evaluate_health(status, now, no_upload_since=None):
     issues = []
 
     last_heartbeat = status.get("last_heartbeat")
@@ -184,10 +188,16 @@ def evaluate_health(status, now):
         issues.append(f"heartbeat stale for {format_age(now, last_heartbeat)}")
 
     last_upload = status.get("last_successful_upload")
-    if not isinstance(last_upload, (int, float)):
-        issues.append("missing successful upload timestamp")
-    elif (now - last_upload) > STALE_UPLOAD_SECONDS:
-        issues.append(f"upload stale for {format_age(now, last_upload)}")
+    if isinstance(last_upload, (int, float)):
+        if (now - last_upload) > STALE_UPLOAD_SECONDS:
+            issues.append(f"upload stale for {format_age(now, last_upload)}")
+    elif no_upload_since is not None:
+        # No upload has ever been recorded. Measure from when this watchdog first noticed,
+        # not from now, so a fresh install gets a real grace period -- but unlike the
+        # uploader's own started_at, this cannot be reset by restarting the service, so a
+        # station that never manages to upload is still caught.
+        if (now - no_upload_since) > STALE_UPLOAD_SECONDS:
+            issues.append(f"no successful upload ever; first noticed {format_age(now, no_upload_since)} ago")
 
     return issues
 
@@ -213,12 +223,20 @@ def main():
         {
             "consecutive_failures": 0,
             "last_alert_at": 0,
-            "reboot_triggered": False,
+            "last_reboot_at": 0,
         },
     )
 
     hostname = socket.gethostname()
-    issues = evaluate_health(status, now)
+
+    # Track "never uploaded" in watchdog state, not from the uploader's started_at, which
+    # a restart loop would keep refreshing.
+    if isinstance(status.get("last_successful_upload"), (int, float)):
+        state.pop("no_upload_since", None)
+    elif not isinstance(state.get("no_upload_since"), (int, float)):
+        state["no_upload_since"] = now
+
+    issues = evaluate_health(status, now, state.get("no_upload_since"))
 
     if issues:
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
@@ -240,15 +258,16 @@ def main():
             if send_mailgun_email(subject, body):
                 state["last_alert_at"] = now
 
+        last_reboot_at = float(state.get("last_reboot_at", 0) or 0)
         if (
             REBOOT_ENABLED
             and state["consecutive_failures"] >= MAX_FAILURES_BEFORE_REBOOT
-            and not state.get("reboot_triggered", False)
+            and (now - last_reboot_at) > MIN_SECONDS_BETWEEN_REBOOTS
         ):
             reboot_subject = f"Weather station watchdog rebooting {hostname}"
             reboot_body = body + "\nAction: reboot initiated by watchdog.\n"
             send_mailgun_email(reboot_subject, reboot_body)
-            state["reboot_triggered"] = True
+            state["last_reboot_at"] = now
             persist_state(state, hostname)
             reboot_pi()
             return
@@ -267,7 +286,9 @@ def main():
         send_mailgun_email(subject, body)
 
     state["consecutive_failures"] = 0
-    state["reboot_triggered"] = False
+    # last_reboot_at is deliberately NOT cleared here: recovery is exactly when the old
+    # boolean latch got reset, which is what allowed reboot loops.
+    state.pop("reboot_triggered", None)
     persist_state(state, hostname)
     print("Watchdog check passed")
 

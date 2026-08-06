@@ -6,5 +6,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
-ExecStart=/usr/bin/python3 /home/pi/weather/Weather_Upload_RPi/watchdog_mailgun.py
+# Item 30: use the project venv, not /usr/bin/python3. The watchdog imports requests,
+# so on the system interpreter it depended on a separate, unversioned system-wide
+# install -- a Debian upgrade, a pip uninstall, or PEP-668 enforcement would each kill
+# it on import every 5 minutes, silently leaving the station unguarded.
+ExecStart=/home/pi/weather/Weather_Upload_RPi/venv/bin/python /home/pi/weather/Weather_Upload_RPi/watchdog_mailgun.py
 EnvironmentFile=-/etc/default/weather-watchdog
