@@ -27,11 +27,6 @@ import urllib.parse
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-import requests
-
-import WU_credentials
-import WU_upload
-
 # Deliberately NOT rtupdate: rapidfire exists to drive the live display. Backdated observations
 # belong on the standard endpoint.
 ENDPOINT = "https://weatherstation.wunderground.com/weatherstation/updateweatherstation.php"
@@ -71,6 +66,8 @@ def load_row(when, path, tolerance_seconds=30):
 
 def build_url(stamp, fields):
     """Same field set as upload2WU, with a real dateutc instead of 'now'."""
+    import WU_credentials
+
     utc = stamp.astimezone(datetime.timezone.utc)
 
     params = [
@@ -116,6 +113,8 @@ def main():
     if match is None:
         sys.exit("No logged observation within 30s of %s on %s" % (args.time, args.date))
 
+    import WU_upload
+
     stamp, fields = match
     url, utc = build_url(stamp, fields)
     age = datetime.datetime.now(datetime.timezone.utc) - utc.replace(tzinfo=datetime.timezone.utc) \
@@ -131,6 +130,8 @@ def main():
     if not args.send:
         print("\nDry run. Re-run with --send to upload this single observation.")
         return
+
+    import requests
 
     try:
         response = requests.get(url, timeout=(5, 10))
