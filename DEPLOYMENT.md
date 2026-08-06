@@ -182,7 +182,7 @@ sudo timedatectl set-timezone America/New_York && timedatectl
 ```
 
 The Pi has **no RTC**. On boot it restores the clock from `fake-hwclock` and corrects it once NTP
-syncs. See `AUDIT_PLAN.md` item 27 — all program timers must be monotonic for this to be safe.
+syncs. See `temp/AUDIT_PLAN.md` item 27 — all program timers must be monotonic for this to be safe.
 
 ### 4.6 Persistent journald
 
@@ -262,7 +262,7 @@ If you see CRC failures on every packet, the UART is wrong (§4.3) or the A/B pa
 ## 6. systemd units
 
 > **Not yet in the repo.** These are transcribed from the running Pi as of 2026-08-06. Committing
-> them under `deploy/` is item 4 of `AUDIT_PLAN.md` and should be done as part of the refactor;
+> them under `deploy/` is item 4 of `temp/AUDIT_PLAN.md` and should be done as part of the refactor;
 > until then this section is the only record.
 
 ### 6.1 `/etc/systemd/system/weather_uploader.service`
@@ -286,7 +286,7 @@ WantedBy=multi-user.target
 ```
 
 `WorkingDirectory` is **load-bearing**: the program writes logs to the relative path `Logs/`
-(`AUDIT_PLAN.md` item 6). Do not omit it until that item is fixed.
+(`temp/AUDIT_PLAN.md` item 6). Do not omit it until that item is fixed.
 
 ### 6.2 `/etc/systemd/system/weather-watchdog.service`
 
@@ -305,7 +305,7 @@ EnvironmentFile=-/etc/default/weather-watchdog
 Runs as **root** because it may call `/sbin/reboot`.
 
 > Note `/usr/bin/python3`, not the venv — so `requests` must also be installed system-wide. This
-> split is `AUDIT_PLAN.md` item 30; when fixed, point this at the venv interpreter and drop the
+> split is `temp/AUDIT_PLAN.md` item 30; when fixed, point this at the venv interpreter and drop the
 > system-wide install.
 
 On a fresh Pi, satisfy the system-Python dependency:
@@ -399,7 +399,7 @@ sudo systemctl kill -s KILL weather_uploader; sleep 8; systemctl is-active weath
 Should print `active` — systemd restarted it within `RestartSec=5`.
 
 > This does **not** prove recovery from a *hang*, only from a crash. Nothing in the current build
-> detects a hung main loop; that is `AUDIT_PLAN.md` item 29 and is the top of the remediation plan.
+> detects a hung main loop; that is `temp/AUDIT_PLAN.md` item 29 and is the top of the remediation plan.
 
 ---
 
@@ -487,11 +487,11 @@ Read before building a fresh Pi.
    `rpi-lgpio` (a drop-in replacement) if `import board` fails. The production Pi 3B uses
    `RPi.GPIO==0.7.1` and is unaffected — but a fresh build on newer hardware may not be.
 
-   Note this whole class of problem disappears if the Blinka stack is dropped (`AUDIT_PLAN.md`
+   Note this whole class of problem disappears if the Blinka stack is dropped (`temp/AUDIT_PLAN.md`
    item 32).
 3. **Two Python environments.** The uploader uses the venv; the watchdog uses system Python. Both
    need `requests`. Easy to satisfy one and forget the other — the failure is a watchdog that dies on
-   import every 5 minutes and silently stops guarding (`AUDIT_PLAN.md` items 30, 31).
+   import every 5 minutes and silently stops guarding (`temp/AUDIT_PLAN.md` items 30, 31).
 4. **`WorkingDirectory` dependency.** Log paths are relative; the service will not start correctly
    without it (item 6).
 5. **No RTC.** A boot without internet runs on a `fake-hwclock` estimate until NTP corrects it, which

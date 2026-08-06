@@ -19,7 +19,7 @@
 # dependencies, not something this project asked for. Blinka pulls in ~17
 # packages to emulate the CircuitPython API across every board it supports;
 # this project uses exactly one of them (I2C read of a BME280).
-# See AUDIT_PLAN.md item 32 for the proposal to drop the Blinka stack.
+# See temp/AUDIT_PLAN.md item 32 for the proposal to drop the Blinka stack.
 
 # --- Serial link to the Davis 6322C over the RS485 HAT -----------------------
 pyserial==3.5

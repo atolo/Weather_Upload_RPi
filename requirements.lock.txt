@@ -1,0 +1,60 @@
+# Weather_Upload_RPi — full transitive dependency lock
+#
+# Captured with `pip freeze` from the production venv on 2026-08-06.
+# Environment: Raspberry Pi 3 Model B Rev 1.2, Debian 13 (trixie), Python 3.13.5
+#
+# This is the exact set running against the live Davis 6322C, with the two
+# deliberate exclusions noted below. Use it for a byte-identical rebuild:
+#
+#   ./venv/bin/pip install -r requirements.lock.txt
+#
+# The repo has no tests, so these pins are the only thing standing between an
+# `apt`/`pip` upgrade and a silently broken station. Re-capture and re-commit
+# this file whenever dependencies change deliberately.
+#
+# ---------------------------------------------------------------------------
+# EXCLUDED FROM THIS LOCK (present in production, deliberately not reproduced)
+#
+#   board==1.0    An unrelated PyPI package that happens to be named `board`.
+#                 Adafruit-Blinka PROVIDES the `board` module itself, as a
+#                 site-packages/board.py inside its own distribution — it does
+#                 not depend on any PyPI package called `board`. This one was
+#                 installed by hand, almost certainly after an `import board`
+#                 failure. Both write the same filename, so whichever is
+#                 installed LAST wins; production currently resolves to
+#                 Blinka's (the BME280 initialises and pressure readings are
+#                 valid), but a rebuild in a different order would silently
+#                 flip it. Do not reinstall it.
+#
+#   py-spy==0.4.2 Diagnostic tool, not a runtime dependency. Install separately:
+#                 ./venv/bin/pip install py-spy==0.4.2
+# ---------------------------------------------------------------------------
+#
+# Most of what follows is Adafruit-Blinka's dependency tree, not this project's
+# needs — pyftdi/pyusb (FTDI adapters), binho-host-adapter, rpi_ws281x and the
+# Pi5-Neopixel package (LED drivers), RPi.GPIO, sysv_ipc. None are used by this
+# codebase. See AUDIT_PLAN.md item 32.
+
+Adafruit-Blinka==8.69.0
+Adafruit-Blinka-Raspberry-Pi5-Neopixel==1.0.0rc2
+adafruit-circuitpython-bme280==2.6.30
+adafruit-circuitpython-busdevice==5.2.14
+adafruit-circuitpython-connectionmanager==3.1.6
+adafruit-circuitpython-requests==4.1.15
+adafruit-circuitpython-typing==1.12.3
+Adafruit-PlatformDetect==3.86.0
+Adafruit-PureIO==1.1.11
+binho-host-adapter==0.1.6
+certifi==2026.1.4
+charset-normalizer==3.4.4
+idna==3.11
+pyftdi==0.57.1
+pyserial==3.5
+pyusb==1.3.1
+requests==2.32.5
+RPi.GPIO==0.7.1
+rpi_ws281x==5.0.0
+smbus2==0.6.0
+sysv_ipc==1.1.0
+typing_extensions==4.15.0
+urllib3==2.6.2
