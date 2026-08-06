@@ -369,6 +369,17 @@ sudo passwd -S pi
 `P` means a password is set and it is safe to remove the blanket rule. `NP` or `L` means leave it
 alone until you set one.
 
+**On a fresh build, do this while there is nothing to lose.** Set a password for `pi`, remove the
+default rule, and let the two narrow grants stand on their own:
+
+```bash
+sudo passwd pi && sudo rm -f /etc/sudoers.d/010_pi-nopasswd && sudo -l -U pi
+```
+
+The production Pi was left with the blanket rule in place (decided 2026-08-06 — that card is being
+replaced after the refactor rather than hardened in place), so a rebuild is the first opportunity
+this is actually worth doing.
+
 Then confirm the watchdog is no longer root:
 
 ```bash
