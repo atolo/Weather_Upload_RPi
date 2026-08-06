@@ -296,9 +296,11 @@ def printWeatherDataTable(printRawData=None):
         strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew]) + "("  + dataType[g_rawDataNew[0] >> 4] + ")"
     
     if (g_TableHeaderCntr1 == 0):
-        print(strHeader)
+        if debug:
+            print(strHeader)
         g_TableHeaderCntr1 = 20 # reset header counter
-    print(strSummary)
+    if debug:
+        print(strSummary)
     
     g_TableHeaderCntr1 -= 1
 
@@ -578,7 +580,8 @@ try:
                         perfStats[STAT_ISS_SUCCESS] += 1
                         # reset consecutive CRC failure counter on successful decode
                         g_crc_fail_count = 0
-                        print(f"Successfully decoded: {decodeMessage}")
+                        if debug:
+                            print(f"Successfully decoded: {decodeMessage}")
                     else:
                         errMsg = f"Error decoding ISS packet data: {decodeMessage}"
                         print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
