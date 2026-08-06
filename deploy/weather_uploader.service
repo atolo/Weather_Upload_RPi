@@ -1,12 +1,28 @@
 [Unit]
 Description=Weather_Upload_RPi service
 After=network.target
+# Never latch into a permanent failed state after repeated restarts -- an unattended
+# station has nobody to run `systemctl reset-failed`.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec is the fix for the Aug 1-3 2026 outage (AUDIT_PLAN item 29a).
+# The main loop blocked for 46.76 hours without ever exiting, so Restart=always never
+# fired. systemd now kills and restarts the unit if the loop stops pinging WATCHDOG=1.
+#
+# Recovery takes roughly WatchdogSec + TimeoutStopSec + RestartSec (~140 s), not 120 s.
+# This cannot rescue a task wedged in uninterruptible kernel sleep -- SIGKILL cannot be
+# delivered until the syscall returns -- but it covers deadlocks, stopped processes and
+# ordinary blocking calls, which is the failure class actually observed.
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
+TimeoutStopSec=15
 User=pi
 WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
 Environment=PYTHONUNBUFFERED=1
+# Set WEATHER_DEBUG=1 to re-enable per-packet tracing. Leave it off normally: it emits
+# ~46k lines/day and buries anything useful.
 ExecStart=/home/pi/weather/Weather_Upload_RPi/venv/bin/python /home/pi/weather/Weather_Upload_RPi/Weather_Station.py
 Restart=always
 RestartSec=5

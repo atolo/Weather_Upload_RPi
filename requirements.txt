@@ -36,9 +36,8 @@ adafruit-circuitpython-bme280==2.6.30
 Adafruit-Blinka==8.69.0
 
 # --- Added by the remediation plan -------------------------------------------
-# Item 29(a): systemd WatchdogSec liveness notifications. Uncomment when
-# implemented, and add to the lock file at the same time.
-# sdnotify==0.3.2
+# Item 29(a): systemd WatchdogSec liveness notifications.
+sdnotify==0.3.2
 
 
 # --- Development / diagnostics — NOT required at runtime ---------------------

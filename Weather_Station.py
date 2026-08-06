@@ -24,6 +24,7 @@ import WU_decodeData # Decodes wireless data coming from Davis ISS weather stati
 import weatherData_cls # class to hold weather data for the Davis ISS station
 from subprocess import check_output # used to print RPi IP address
 import serial
+import sdnotify # systemd watchdog liveness notifications
 
 # Configuration constants
 debug = os.getenv("WEATHER_DEBUG", "0") == "1"  # per-packet tracing; off by default to keep the journal readable
@@ -503,6 +504,14 @@ IP = IP.decode('utf-8') # removes b' previx
 print("RPi IP Address: {}".format(IP)) 
 print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
+# Serial port and BME280 are already open by this point, so the service is functional.
+# READY=1 is deliberately sent BEFORE the startup network calls below: under Type=notify
+# a WAN outage during getDailyRain() would otherwise stall activation past TimeoutStartSec
+# and put the unit into a restart loop at exactly the moment it should keep logging.
+# No-ops when NOTIFY_SOCKET is unset, so running this script by hand is unaffected.
+systemd_notifier = sdnotify.SystemdNotifier()
+systemd_notifier.notify("READY=1")
+
 # Create log files for data and errors, First Param = True means to create a new file, vs append to a file
 logFile(True, "Data",   "")
 logFile(True, "Errors", "")
@@ -567,6 +576,11 @@ write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
 
 try:
     while True:
+
+        # Liveness only -- says "the loop is turning", not "the data is good". Serial silence
+        # and upload failure are deliberately handled elsewhere so a dead ISS cannot make
+        # systemd kill-restart a process that is otherwise working correctly.
+        systemd_notifier.notify("WATCHDOG=1")
 
         decodeStatus = False # Reset status
         
