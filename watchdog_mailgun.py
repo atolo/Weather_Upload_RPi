@@ -18,10 +18,24 @@ WATCHDOG_STATE_FILE = os.getenv("WATCHDOG_STATE_FILE", DEFAULT_WATCHDOG_STATE_FI
 
 STALE_UPLOAD_SECONDS = int(os.getenv("WATCHDOG_STALE_UPLOAD_SECONDS", "900"))
 STALE_HEARTBEAT_SECONDS = int(os.getenv("WATCHDOG_STALE_HEARTBEAT_SECONDS", "180"))
+MAX_FAILURES_BEFORE_RESTART = int(os.getenv("WATCHDOG_MAX_FAILURES_BEFORE_RESTART", "2"))
 MAX_FAILURES_BEFORE_REBOOT = int(os.getenv("WATCHDOG_MAX_FAILURES_BEFORE_REBOOT", "3"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("WATCHDOG_ALERT_COOLDOWN_SECONDS", "1800"))
 BOOT_GRACE_SECONDS = int(os.getenv("WATCHDOG_BOOT_GRACE_SECONDS", "300"))
 REBOOT_ENABLED = os.getenv("WATCHDOG_REBOOT_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+# Item 2: rebooting the Pi because the internet is down fixes nothing and takes the station's
+# local logging down with it. Opt in only if the Pi's own NIC is the suspect.
+REBOOT_ON_NO_INTERNET = os.getenv("WATCHDOG_REBOOT_ON_NO_INTERNET", "false").strip().lower() in {"1", "true", "yes"}
+# A service restart needs time to prove itself before the next rung is considered.
+RESTART_GRACE_SECONDS = int(os.getenv("WATCHDOG_RESTART_GRACE_SECONDS", "600"))
+MIN_SECONDS_BETWEEN_RESTARTS = int(os.getenv("WATCHDOG_MIN_SECONDS_BETWEEN_RESTARTS", "900"))
+UPLOADER_UNIT = os.getenv("WATCHDOG_UPLOADER_UNIT", "weather_uploader.service")
+
+# Connectivity probes (item 2). The neutral probe is an IP literal on purpose: it isolates
+# "no route to the internet" from "DNS is broken", which a hostname probe cannot do.
+PROBE_TIMEOUT_SECONDS = int(os.getenv("WATCHDOG_PROBE_TIMEOUT_SECONDS", "5"))
+WU_UPLOAD_HOST = os.getenv("WATCHDOG_WU_HOST", "rtupdate.wunderground.com")
+NEUTRAL_PROBE_IP = os.getenv("WATCHDOG_NEUTRAL_PROBE_IP", "1.1.1.1")
 # Item 1: a boolean latch was cleared by any single clean pass, so a station that looked
 # healthy for one cycle after a reboot could be rebooted again immediately. A timestamp
 # cannot be cleared by recovery.
@@ -159,6 +173,18 @@ def describe_last_error(status, now):
     return f"{redact(error_text)} ({format_age(now, error_at)} ago)"
 
 
+def describe_last_restart(state, now):
+    """Whether the ladder has already pulled the restart lever, and whether it worked.
+
+    "FAILED" here almost always means the sudoers rule is missing after the item 39 change,
+    which is worth saying out loud in the alert rather than leaving to be inferred."""
+    last_restart_at = float(state.get("last_restart_at", 0) or 0)
+    if not last_restart_at:
+        return "never"
+    outcome = "ok" if state.get("last_restart_ok") else "FAILED"
+    return f"{format_age(now, last_restart_at)} ago, {outcome}"
+
+
 def send_mailgun_email(subject, body):
     if not (MAILGUN_API_KEY and MAILGUN_DOMAIN and MAILGUN_FROM and MAILGUN_TO):
         print("Mailgun is not configured; skipping email send")
@@ -216,6 +242,20 @@ def staleness_issue(label, timestamp, now, limit, uptime=None):
     return f"{label} stale for {format_age(now, timestamp)}"
 
 
+UPLOAD_ISSUE_PREFIXES = ("upload", "no successful upload")
+NETWORK_FAULTS = ("internet_unreachable", "dns_unavailable", "wu_unreachable")
+
+
+def is_upload_only(issues):
+    """True when every issue is about publishing, so the program itself is still ticking.
+
+    This is the distinction the watchdog previously could not make (item 2): a stale
+    heartbeat means the process is stuck and a restart is warranted, while stale uploads
+    alone are just as likely to mean the WAN is down, in which case nothing local is broken
+    and every corrective action available makes things worse."""
+    return bool(issues) and all(issue.startswith(UPLOAD_ISSUE_PREFIXES) for issue in issues)
+
+
 def evaluate_health(status, now, no_upload_since=None, uptime=None):
     issues = []
 
@@ -243,12 +283,119 @@ def evaluate_health(status, now, no_upload_since=None, uptime=None):
     return issues
 
 
+def resolves(hostname):
+    try:
+        socket.getaddrinfo(hostname, 443)
+        return True
+    except OSError:
+        return False
+
+
+def tcp_reachable(host, port=443, timeout=PROBE_TIMEOUT_SECONDS):
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def classify_connectivity():
+    """Why uploads might be failing, from the least to the most damning for the program.
+
+    A perfectly healthy uploader with a dead WAN link produces exactly the same status file
+    as a wedged one, and rebooting is the wrong answer to the first. These probes are
+    diagnostic evidence, not proof -- they run from this process, five minutes after the
+    fact, and a transient outage will have gone by then. They are used only to decide
+    whether a destructive action is justified, never to declare the station healthy.
+    """
+    if tcp_reachable(WU_UPLOAD_HOST):
+        return "wu_reachable"
+    if not tcp_reachable(NEUTRAL_PROBE_IP):
+        return "internet_unreachable"
+    if not resolves(WU_UPLOAD_HOST):
+        return "dns_unavailable"
+    return "wu_unreachable"
+
+
+def privileged(command):
+    """Item 39: the watchdog no longer runs as root, so the two privileged verbs go through
+    a narrow sudoers rule (deploy/weather-watchdog.sudoers). Kept working under root as well
+    so the unit and the sudoers file can be installed in either order without a window where
+    the station has no watchdog."""
+    if os.geteuid() == 0:
+        return command
+    return ["sudo", "-n"] + command
+
+
+def run_privileged(command, description):
+    argv = privileged(command)
+    try:
+        # Long enough to outlast the uploader's own start: `systemctl restart` on a Type=notify
+        # unit blocks until READY=1 or TimeoutStartSec (90 s). A shorter timeout here would
+        # report a failure for a restart that was actually still in progress.
+        result = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        print(f"Failed to execute {description}: {exc}")
+        return False
+
+    if result.returncode == 0:
+        print(f"{description}: ok")
+        return True
+
+    # Most likely cause of a non-zero exit here is a missing sudoers rule, which would
+    # otherwise fail silently and leave the ladder looking like it had acted.
+    print(f"{description} FAILED (exit {result.returncode}): {result.stderr.strip()}")
+    return False
+
+
+def decide_action(state, now, connectivity):
+    """Which rung of the escalation ladder is justified right now: 'none', 'restart' or 'reboot'.
+
+    Rebooting a Pi to fix a Python process is a last resort, so it is reachable only after a
+    service restart has been attempted during THIS incident and given RESTART_GRACE_SECONDS to
+    take effect. The reboot rung is tested first so the outcome does not depend on which
+    cooldown happens to expire in which order.
+    """
+    failures = int(state.get("consecutive_failures", 0))
+    last_restart_at = float(state.get("last_restart_at", 0) or 0)
+    last_reboot_at = float(state.get("last_reboot_at", 0) or 0)
+    incident_started_at = float(state.get("incident_started_at", 0) or 0)
+
+    # The program is alive and the network is not. A restart changes nothing and a reboot also
+    # takes local logging down -- neither is a response to someone else's outage.
+    if connectivity in NETWORK_FAULTS and not REBOOT_ON_NO_INTERNET:
+        return "none"
+
+    if (
+        REBOOT_ENABLED
+        and failures >= MAX_FAILURES_BEFORE_REBOOT
+        and last_restart_at > 0
+        and last_restart_at >= incident_started_at
+        and (now - last_restart_at) > RESTART_GRACE_SECONDS
+        and (now - last_reboot_at) > MIN_SECONDS_BETWEEN_REBOOTS
+    ):
+        return "reboot"
+
+    if (
+        failures >= MAX_FAILURES_BEFORE_RESTART
+        and (now - last_restart_at) > MIN_SECONDS_BETWEEN_RESTARTS
+    ):
+        return "restart"
+
+    return "none"
+
+
+def restart_uploader():
+    print(f"Restarting {UPLOADER_UNIT}")
+    return run_privileged(["/usr/bin/systemctl", "restart", UPLOADER_UNIT],
+                          f"restart {UPLOADER_UNIT}")
+
+
 def reboot_pi():
     print("Rebooting Raspberry Pi")
-    try:
-        subprocess.run(["/sbin/reboot"], check=False)
-    except Exception as exc:
-        print(f"Failed to execute reboot command: {exc}")
+    # systemctl reboot rather than /sbin/reboot: on this Debian /sbin/reboot is a symlink to
+    # /usr/bin/systemctl, and naming the real binary keeps the sudoers rule unambiguous.
+    return run_privileged(["/usr/bin/systemctl", "reboot"], "reboot")
 
 
 def main():
@@ -282,17 +429,32 @@ def main():
 
     if issues:
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+        failures = state["consecutive_failures"]
+        if failures == 1:
+            # Stamped so the ladder is re-climbed from the bottom for each new incident: a
+            # restart from a fault last week must not license an immediate reboot today.
+            state["incident_started_at"] = now
         should_alert = (now - float(state.get("last_alert_at", 0))) >= ALERT_COOLDOWN_SECONDS
         issue_text = "; ".join(issues)
         last_error = describe_last_error(status, now)
+
+        # Probe only when the program is responding and just the uploads are stale. A stale
+        # heartbeat is not a network question, and the probes cost a DNS lookup and two
+        # connects on a link that may already be struggling.
+        if is_upload_only(issues):
+            connectivity = classify_connectivity()
+        else:
+            connectivity = "not probed (program not responding)"
 
         subject = f"Weather station watchdog alert on {hostname}"
         body = (
             f"Watchdog detected stale weather station state on {hostname}.\n"
             f"Issues: {issue_text}\n"
-            f"Consecutive failures: {state['consecutive_failures']}\n"
+            f"Consecutive failures: {failures}\n"
+            f"Connectivity: {connectivity}\n"
             f"Status file: {STATUS_FILE}\n"
             f"Last upload error: {last_error}\n"
+            f"Last uploader restart: {describe_last_restart(state, now)}\n"
             f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}\n"
         )
 
@@ -300,20 +462,33 @@ def main():
             if send_mailgun_email(subject, body):
                 state["last_alert_at"] = now
 
-        last_reboot_at = float(state.get("last_reboot_at", 0) or 0)
-        if (
-            REBOOT_ENABLED
-            and state["consecutive_failures"] >= MAX_FAILURES_BEFORE_REBOOT
-            and (now - last_reboot_at) > MIN_SECONDS_BETWEEN_REBOOTS
-        ):
+        action = decide_action(state, now, connectivity)
+
+        if action == "reboot":
             reboot_subject = f"Weather station watchdog rebooting {hostname}"
             reboot_body = body + "\nAction: reboot initiated by watchdog.\n"
             send_mailgun_email(reboot_subject, reboot_body)
             state["last_reboot_at"] = now
+            # Persist BEFORE rebooting: once systemctl reboot returns there may be no more
+            # scheduling quantum, and a lost write here means the cooldown never applies.
             persist_state(state, hostname)
             reboot_pi()
             return
 
+        if action == "restart":
+            restarted = restart_uploader()
+            state["last_restart_at"] = now
+            state["last_restart_ok"] = restarted
+            restart_body = body + (
+                f"\nAction: {UPLOADER_UNIT} restart "
+                f"{'succeeded' if restarted else 'FAILED -- check the sudoers rule'}.\n"
+            )
+            send_mailgun_email(f"Weather station watchdog restarted {UPLOADER_UNIT} on {hostname}",
+                               restart_body)
+            persist_state(state, hostname)
+            return
+
+        print(f"No corrective action taken (connectivity: {connectivity}, failures: {failures})")
         persist_state(state, hostname)
         return
 
@@ -328,8 +503,10 @@ def main():
         send_mailgun_email(subject, body)
 
     state["consecutive_failures"] = 0
-    # last_reboot_at is deliberately NOT cleared here: recovery is exactly when the old
-    # boolean latch got reset, which is what allowed reboot loops.
+    # last_reboot_at and last_restart_at are deliberately NOT cleared here: recovery is exactly
+    # when the old boolean latch got reset, which is what allowed reboot loops. Clearing
+    # incident_started_at is what makes the next incident start again at the bottom rung.
+    state.pop("incident_started_at", None)
     state.pop("reboot_triggered", None)
     persist_state(state, hostname)
     print("Watchdog check passed")

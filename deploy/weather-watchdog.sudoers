@@ -1,0 +1,24 @@
+# Narrow privilege grant for the weather station watchdog (AUDIT_PLAN items 2 and 39).
+#
+# The watchdog used to run as root for one line of functionality: the reboot call. Everything
+# else it does -- reading weather_status.json, writing watchdog_state.json, POSTing to the
+# Mailgun API -- needs no privilege at all, so a script that makes outbound HTTPS requests
+# carrying an API key, and that imports WU_credentials, had full root authority for no reason.
+#
+# It now runs as pi and asks for exactly two verbs. Both are argument-exact: `systemctl restart`
+# is granted for the uploader unit only, and `systemctl reboot` takes no arguments. Note that
+# /sbin/reboot on this system is a symlink to /usr/bin/systemctl, which is why the rule names
+# the real binary -- a rule written against the symlink would be ambiguous.
+#
+# Install with visudo so a syntax error cannot lock the machine out of sudo:
+#
+#   sudo install -m 440 -o root -g root deploy/weather-watchdog.sudoers \
+#        /etc/sudoers.d/weather-watchdog
+#   sudo visudo -c
+#
+# Verify (as pi, must print the two allowed commands and nothing else):
+#
+#   sudo -l -U pi | grep -A3 NOPASSWD
+
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl restart weather_uploader.service
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl reboot

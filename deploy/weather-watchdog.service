@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Item 39: was root, for the single line that called /sbin/reboot. It now runs as pi and
+# escalates through /etc/sudoers.d/weather-watchdog, which grants exactly two commands.
+# Install deploy/weather-watchdog.sudoers BEFORE this unit change, or the escalation ladder
+# will report "restart FAILED -- check the sudoers rule" and take no action.
+# Running as pi also fixes the incidental root ownership of Logs/watchdog_state.json.
+User=pi
+Group=pi
 WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
 # Item 30: use the project venv, not /usr/bin/python3. The watchdog imports requests,
 # so on the system interpreter it depended on a separate, unversioned system-wide

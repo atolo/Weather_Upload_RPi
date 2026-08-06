@@ -112,29 +112,33 @@ class TestClockSteps:
 class TestRebootCooldown:
     """Item 1: the old reboot_triggered boolean was reset by any single clean pass. Because
     startup wrote a fake upload timestamp, every boot produced exactly one clean pass, which
-    cleared the latch and allowed the next reboot ~15-30 minutes later, indefinitely."""
+    cleared the latch and allowed the next reboot ~15-30 minutes later, indefinitely.
+
+    The ladder itself is covered in test_escalation_ladder.py; these pin the cooldown, which
+    is the part that has to survive a recovery to be worth anything."""
 
     @staticmethod
-    def _may_reboot(state, now):
-        last_reboot_at = float(state.get("last_reboot_at", 0) or 0)
-        return (
-            state["consecutive_failures"] >= wd.MAX_FAILURES_BEFORE_REBOOT
-            and (now - last_reboot_at) > wd.MIN_SECONDS_BETWEEN_REBOOTS
-        )
+    def _ready_to_reboot(last_reboot_at):
+        return {
+            "consecutive_failures": wd.MAX_FAILURES_BEFORE_REBOOT,
+            "incident_started_at": NOW - 1800,
+            "last_restart_at": NOW - (wd.RESTART_GRACE_SECONDS + 60),
+            "last_reboot_at": last_reboot_at,
+        }
 
-    def test_reboots_when_threshold_reached_and_never_rebooted(self):
-        assert self._may_reboot({"consecutive_failures": 3, "last_reboot_at": 0}, NOW)
+    def test_reboots_when_threshold_reached_and_never_rebooted(self, monkeypatch):
+        monkeypatch.setattr(wd, "REBOOT_ENABLED", True)
+        assert wd.decide_action(self._ready_to_reboot(0), NOW, "wu_reachable") == "reboot"
 
-    def test_does_not_reboot_below_threshold(self):
-        assert not self._may_reboot({"consecutive_failures": 2, "last_reboot_at": 0}, NOW)
-
-    def test_suppressed_inside_cooldown_even_after_a_clean_pass(self):
+    def test_suppressed_inside_cooldown_even_after_a_clean_pass(self, monkeypatch):
+        monkeypatch.setattr(wd, "REBOOT_ENABLED", True)
         recent = NOW - (wd.MIN_SECONDS_BETWEEN_REBOOTS - 60)
-        assert not self._may_reboot({"consecutive_failures": 9, "last_reboot_at": recent}, NOW)
+        assert wd.decide_action(self._ready_to_reboot(recent), NOW, "wu_reachable") != "reboot"
 
-    def test_allowed_once_cooldown_expires(self):
+    def test_allowed_once_cooldown_expires(self, monkeypatch):
+        monkeypatch.setattr(wd, "REBOOT_ENABLED", True)
         old = NOW - (wd.MIN_SECONDS_BETWEEN_REBOOTS + 60)
-        assert self._may_reboot({"consecutive_failures": 3, "last_reboot_at": old}, NOW)
+        assert wd.decide_action(self._ready_to_reboot(old), NOW, "wu_reachable") == "reboot"
 
     def test_default_cooldown_is_long_enough_to_break_a_loop(self):
         """The observed loop period was 15-30 minutes; the cooldown must dwarf it."""

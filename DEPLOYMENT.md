@@ -40,7 +40,7 @@ Link parameters: **4800 baud, 8N1**, 8-byte packets, one every ~2.56 s for stati
 ### BME280 → Pi (I2C)
 
 `VIN`→3V3, `GND`→GND, `SCL`→GPIO3 (pin 5), `SDA`→GPIO2 (pin 3). The address is hardcoded to **0x76**
-at `Weather_Station.py:77`; some breakouts ship as 0x77 and will need that line changed.
+at `Weather_Station.py:112`; some breakouts ship as 0x77 and will need that line changed.
 
 ---
 
@@ -174,7 +174,7 @@ i2cdetect -y 1
 ### 4.5 Timezone and clock
 
 **Not cosmetic.** Log filenames use `time.strftime("%y%m%d")` and the daily rain reset compares the
-local day-of-month (`Weather_Station.py:633`). A wrong timezone rolls the rain counter at the wrong
+local day-of-month (`Weather_Station.py:811`). A wrong timezone rolls the rain counter at the wrong
 hour and misdates every log file.
 
 ```bash
@@ -182,7 +182,9 @@ sudo timedatectl set-timezone America/New_York && timedatectl
 ```
 
 The Pi has **no RTC**. On boot it restores the clock from `fake-hwclock` and corrects it once NTP
-syncs. See `temp/AUDIT_PLAN.md` item 27 — all program timers must be monotonic for this to be safe.
+syncs. Every program interval is measured on the monotonic clock so an NTP step cannot stall uploads
+(`temp/AUDIT_PLAN.md` item 27), but log filenames and the daily rain rollover are wall-clock by
+necessity, so the timezone still has to be right.
 
 ### 4.6 Persistent journald
 
@@ -211,8 +213,9 @@ mkdir -p /home/pi/weather && cd /home/pi/weather && git clone https://github.com
 python3 -m venv venv && ./venv/bin/pip install --upgrade pip && ./venv/bin/pip install -r requirements.txt
 ```
 
-If a `requirements.lock.txt` exists, install from that instead — the pinned versions are known-good
-and this repo has no tests to catch an upgrade regression.
+If a `requirements.lock.txt` exists, install from that instead — the pinned versions are known-good,
+and `tests/` covers the watchdog only, so nothing here would catch a decoder or main-loop regression
+from an upgrade.
 
 > **venv fragility:** the venv is bound to the exact system interpreter (currently
 > `/usr/bin/python3.13`). A distribution upgrade that bumps the minor Python version breaks it
@@ -249,90 +252,88 @@ Log out and back in for group changes to take effect.
 Run it in the foreground first. You should see decoded packets within a few seconds:
 
 ```bash
-cd /home/pi/weather/Weather_Upload_RPi && ./venv/bin/python Weather_Station.py
+cd /home/pi/weather/Weather_Upload_RPi && WEATHER_DEBUG=1 ./venv/bin/python Weather_Station.py
 ```
 
-Expect: `BME280 sensor initialized successfully`, then a stream of `Successfully decoded:` lines and
-a tabular weather summary. `Ctrl-C` to stop.
+`WEATHER_DEBUG=1` matters: per-packet tracing is opt-in, and without it a *working* station prints
+almost nothing, which is indistinguishable from a broken one. Never set it in the service unit — it
+emits ~46,000 journal lines a day.
 
-If you see CRC failures on every packet, the UART is wrong (§4.3) or the A/B pair is swapped.
+Expect: `BME280 sensor initialized successfully`, `Daily rain restored from local state`, then a
+stream of `Successfully decoded:` lines and a tabular weather summary. `Ctrl-C` to stop.
+
+If you see CRC failures on every packet, the UART is wrong (§4.3) or the A/B pair is swapped. If the
+port cannot be opened at all you get ten `Serial open failed` lines over 30 s and a non-zero exit
+(item 5) — check `ls -l /dev/serial0` and group membership above.
+
+Then run the test suite, which needs no hardware:
+
+```bash
+./venv/bin/pip install pytest && ./venv/bin/python -m pytest tests/ -q
+```
 
 ---
 
 ## 6. systemd units
 
-> **Not yet in the repo.** These are transcribed from the running Pi as of 2026-08-06. Committing
-> them under `deploy/` is item 4 of `temp/AUDIT_PLAN.md` and should be done as part of the refactor;
-> until then this section is the only record.
+**`deploy/` in this repo is the source of truth.** It holds the three units verbatim, plus the
+journald drop-in and the watchdog's sudoers rule. Do not transcribe them here — a second copy drifts,
+and this section used to prove it.
 
-### 6.1 `/etc/systemd/system/weather_uploader.service`
+Read `deploy/weather_uploader.service` and `deploy/weather-watchdog.service` for the reasoning; every
+non-obvious directive is commented in place.
 
-```ini
-[Unit]
-Description=Weather_Upload_RPi service
-After=network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/weather/Weather_Upload_RPi/venv/bin/python /home/pi/weather/Weather_Upload_RPi/Weather_Station.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`WorkingDirectory` is **load-bearing**: the program writes logs to the relative path `Logs/`
-(`temp/AUDIT_PLAN.md` item 6). Do not omit it until that item is fixed.
-
-### 6.2 `/etc/systemd/system/weather-watchdog.service`
-
-```ini
-[Unit]
-Description=Weather Station Watchdog (Mailgun)
-
-[Service]
-Type=oneshot
-User=root
-WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
-ExecStart=/usr/bin/python3 /home/pi/weather/Weather_Upload_RPi/watchdog_mailgun.py
-EnvironmentFile=-/etc/default/weather-watchdog
-```
-
-Runs as **root** because it may call `/sbin/reboot`.
-
-> Note `/usr/bin/python3`, not the venv — so `requests` must also be installed system-wide. This
-> split is `temp/AUDIT_PLAN.md` item 30; when fixed, point this at the venv interpreter and drop the
-> system-wide install.
-
-On a fresh Pi, satisfy the system-Python dependency:
+### 6.1 Install
 
 ```bash
-sudo apt install -y python3-requests
+sudo install -m 440 -o root -g root deploy/weather-watchdog.sudoers /etc/sudoers.d/weather-watchdog
 ```
 
-(Use the Debian package, not `pip --break-system-packages` — Debian 12+ marks the system interpreter
-as externally managed for good reason.)
-
-### 6.3 `/etc/systemd/system/weather-watchdog.timer`
-
-```ini
-[Unit]
-Description=Run weather station watchdog every 5 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
-Unit=weather-watchdog.service
-
-[Install]
-WantedBy=timers.target
+```bash
+sudo visudo -c
 ```
 
-### 6.4 Optional tuning — `/etc/default/weather-watchdog`
+```bash
+sudo install -m 644 deploy/weather_uploader.service deploy/weather-watchdog.service deploy/weather-watchdog.timer /etc/systemd/system/
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now weather_uploader.service weather-watchdog.timer
+```
+
+**Install the sudoers file first.** The watchdog runs as `pi` and escalates through it for the only
+two privileged things it does (`systemctl restart weather_uploader.service` and `systemctl reboot`).
+Without the rule it still runs, still alerts, and reports `restart FAILED -- check the sudoers rule`,
+but it cannot act.
+
+Two directives are load-bearing and easy to lose:
+
+| Directive | Why |
+|---|---|
+| `WorkingDirectory=` on the uploader | No longer load-bearing for logs — every path is anchored to the script directory (item 6) — but keep it so relative paths in future code cannot silently escape |
+| `Type=notify` + `WatchdogSec=120` | The fix for the Aug 1–3 2026 outage. Removing it restores the failure mode where a blocked main loop runs for 47 hours |
+
+Upgrading a Pi that predates the item 39 change: `Logs/watchdog_state.json` will be root-owned from
+when the watchdog ran as root. `Logs/` is group-writable by `pi` so the atomic writer can replace it
+regardless, but make it tidy:
+
+```bash
+sudo chown pi:pi /home/pi/weather/Weather_Upload_RPi/Logs/watchdog_state.json
+```
+
+### 6.2 Verifying the privilege drop
+
+```bash
+sudo -l -U pi | grep -A3 NOPASSWD
+```
+
+Must list exactly the two `systemctl` commands. Then confirm the watchdog is no longer root:
+
+```bash
+systemctl show weather-watchdog.service -p User -p Group
+```
+
+### 6.3 Optional tuning — `/etc/default/weather-watchdog`
 
 Absent by default, which means all defaults apply **and rebooting is enabled**. Create it only to
 override:
@@ -340,21 +341,30 @@ override:
 ```bash
 WATCHDOG_STALE_UPLOAD_SECONDS=900
 WATCHDOG_STALE_HEARTBEAT_SECONDS=180
+WATCHDOG_MAX_FAILURES_BEFORE_RESTART=2
 WATCHDOG_MAX_FAILURES_BEFORE_REBOOT=3
+WATCHDOG_RESTART_GRACE_SECONDS=600
+WATCHDOG_MIN_SECONDS_BETWEEN_RESTARTS=900
+WATCHDOG_MIN_SECONDS_BETWEEN_REBOOTS=21600
 WATCHDOG_ALERT_COOLDOWN_SECONDS=1800
 WATCHDOG_BOOT_GRACE_SECONDS=300
 WATCHDOG_REBOOT_ENABLED=true
+WATCHDOG_REBOOT_ON_NO_INTERNET=false
+WATCHDOG_NEUTRAL_PROBE_IP=1.1.1.1
 ```
 
-With a 5-minute timer, the defaults reboot the Pi roughly 30 minutes into a sustained upload failure.
+The escalation ladder (item 2) runs on a 5-minute timer and prefers the least destructive action:
+
+1. **Two consecutive failures (~10 min)** → `systemctl restart weather_uploader.service`.
+2. **Three consecutive failures, and the restart has had 10 minutes to work** → reboot, subject to a
+   6-hour reboot cooldown that a recovery does not clear.
+3. **Uploads stale but the heartbeat is fresh** → probe connectivity first. If the internet, DNS or
+   Weather Underground is unreachable, alert and do **nothing else**: the program is fine, and both
+   available actions would only take local logging down too. `WATCHDOG_REBOOT_ON_NO_INTERNET=true`
+   overrides this, for the case where the Pi's own NIC is the suspect.
+
 Set `WATCHDOG_REBOOT_ENABLED=false` during commissioning so a misconfiguration cannot put the new Pi
-into a reboot cycle while you are still working on it.
-
-### 6.5 Enable
-
-```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now weather_uploader.service weather-watchdog.timer
-```
+into a reboot cycle while you are still working on it — and remember to remove it afterwards.
 
 ---
 
@@ -444,7 +454,7 @@ A healthy idle process shows `<module> (Weather_Station.py:615)` — the `time.s
 | No serial data at all | Login shell still on the port; wrong `/dev` node; wiring | `§4.2`; `ls -l /dev/serial0` |
 | `Failed to initialize BME280` | I2C off, wrong address, wiring | `i2cdetect -y 1`; address at `Weather_Station.py:77` |
 | `Permission denied` on `/dev/serial0` | User not in `dialout` | `groups` |
-| Service dead at boot, fine manually | `WorkingDirectory` missing → `Logs/` unwritable | §6.1 |
+| Service dead at boot, fine manually | Serial port not ready, or the venv path is wrong | §6.1, `journalctl -u weather_uploader` |
 | Uploads fail, decoding fine | Credentials, or no internet | `curl -sS https://rtupdate.wunderground.com` |
 | No watchdog emails | Mailgun unconfigured or failing | §10 test command |
 | Random reboots | Watchdog acting on stale uploads | `cat Logs/watchdog_state.json` |
@@ -489,17 +499,21 @@ Read before building a fresh Pi.
 
    Note this whole class of problem disappears if the Blinka stack is dropped (`temp/AUDIT_PLAN.md`
    item 32).
-3. **Two Python environments.** The uploader uses the venv; the watchdog uses system Python. Both
-   need `requests`. Easy to satisfy one and forget the other — the failure is a watchdog that dies on
-   import every 5 minutes and silently stops guarding (`temp/AUDIT_PLAN.md` items 30, 31).
-4. **`WorkingDirectory` dependency.** Log paths are relative; the service will not start correctly
-   without it (item 6).
-5. **No RTC.** A boot without internet runs on a `fake-hwclock` estimate until NTP corrects it, which
-   corrupts elapsed-time calculations and can misdate logs (item 27).
+3. **One Python environment, now.** Both the uploader and the watchdog run on the project venv
+   (item 30). A fresh build needs `requests` and `sdnotify` there and nowhere else — but check
+   `systemctl cat weather-watchdog` on an upgraded Pi, because the old unit pointed at
+   `/usr/bin/python3`.
+4. **Watchdog privilege.** It runs as `pi` and needs `/etc/sudoers.d/weather-watchdog` to restart the
+   uploader or reboot (item 39). Miss it and the watchdog alerts but cannot act — visible as
+   `restart FAILED -- check the sudoers rule` in the alert email and the journal.
+5. **No RTC.** A boot without internet runs on a `fake-hwclock` estimate until NTP corrects it. All
+   intervals are measured on the monotonic clock so a step cannot stall uploads (item 27), but log
+   filenames and line timestamps are wall-clock and can still be misdated.
 6. **Watchdog can reboot the Pi.** Defaults are active unless `/etc/default/weather-watchdog` says
-   otherwise. Disable rebooting during commissioning (§6.4).
-7. **No tests.** Nothing catches a regression before it reaches the live feed. Verify by watching the
-   actual WU station page, not just the local logs.
+   otherwise. Disable rebooting during commissioning (§6.3).
+7. **Tests cover the watchdog, not the station.** `pytest tests/` runs on any machine, but
+   `Weather_Station.py` still opens the serial port and the BME280 at import, so its main loop has no
+   coverage. Verify a change by watching the actual WU station page, not just the local logs.
 
 ---
 
@@ -510,8 +524,8 @@ What is **not** in git and must be restored separately:
 | Item | Source |
 |---|---|
 | `WU_credentials.py` | Your password manager. Keep a copy there — losing it means re-issuing the WU key and Mailgun credentials. |
-| The three systemd units | §6 of this document |
-| `/etc/default/weather-watchdog` | §6.4, if you created one |
+| The three systemd units + sudoers rule | `deploy/` in this repo — see §6.1 |
+| `/etc/default/weather-watchdog` | §6.3, if you created one |
 | OS-level config (UART, I2C, timezone, journald) | §4 |
 | `Logs/` history | Not recoverable. Back it up if the record matters. |
 
