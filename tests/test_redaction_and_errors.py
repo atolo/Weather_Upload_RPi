@@ -3,15 +3,6 @@
 Run from the repo root:  python3 -m pytest tests/ -q
 """
 
-import os
-import sys
-import types
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-for _name in ("WU_credentials", "requests", "weatherData_cls"):
-    sys.modules.setdefault(_name, types.ModuleType(_name))
-
 import watchdog_mailgun as wd
 import WU_upload
 

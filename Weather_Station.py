@@ -31,6 +31,7 @@ debug = os.getenv("WEATHER_DEBUG", "0") == "1"  # per-packet tracing; off by def
 ELEVATION_METERS = 26  # Replace with your actual elevation in meters
 MIN_VALID_PRESSURE_INHG = 25.0  # Minimum valid pressure reading in inches of Hg
 UPLOAD_FREQUENCY_SECONDS = 5  # Seconds between uploads to Weather Underground
+UPLOAD_BACKOFF_MAX_SECONDS = 300  # Ceiling on the retry interval after a failed upload
 DETAIL_STATS_INTERVAL = 60  # Seconds between detail stats logging
 NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
 SERIAL_PORT = "/dev/serial0"  # Davis ISS via the RS485 HAT
@@ -678,6 +679,8 @@ g_crc_fail_count = 0   # consecutive CRC failure counter
 # Wall-clock time is kept only for things that must be human-readable or must cross the process
 # boundary into the status file, where a monotonic value would be meaningless to the watchdog.
 tmr_upload = time.monotonic()     # Initialize timer to trigger when to upload to Weather Underground
+tmr_log = time.monotonic()        # Local data-log cadence, independent of upload success
+uploadBackoff = UPLOAD_FREQUENCY_SECONDS  # item 7: doubles on failure, resets on success
 hourTimer = time.monotonic() + 3600
 g_crc_last_reset_mono = 0.0       # monotonic timestamp of last serial reset
 lastValidPacketMono = time.monotonic()  # only a SUCCESSFUL decode may advance this
@@ -815,9 +818,15 @@ try:
             logFile(True, "Errors", "")
 
 
-        # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
-        # and R/H) then upload new data to Weather Underground
-        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.monotonic() > tmr_upload)):
+        # If RPi has reecived new valid data from Moteino and RPi has dewpoint data (note, dewpoint
+        # depends on Temp and R/H) then record the observation locally, and upload it if the upload
+        # timer has passed.
+        #
+        # Local logging is on its own timer, deliberately. It used to happen inside the upload
+        # branch, so the backoff added below would have thinned the local record to one row per
+        # 300 s during exactly the outages worth having a record of. The station's own data file
+        # should not depend on Weather Underground being reachable.
+        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.monotonic() > tmr_log)):
             newPressure = getAtmosphericPressure() # get latest pressure from bme280
             if (newPressure > MIN_VALID_PRESSURE_INHG):
                 suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
@@ -825,7 +834,9 @@ try:
                 # BME280 did not return a valid pressure. Do not substitute from other stations; keep previous value.
                 print("BME280 pressure invalid or unavailable; omitting pressure from this upload and keeping previous value")
             printWeatherDataTable(printRawData=False) # print weather data. printRawData parameter deterrmines if raw ISS hex data is also printed.
-            
+            tmr_log = time.monotonic() + UPLOAD_FREQUENCY_SECONDS
+
+        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.monotonic() > tmr_upload)):
             uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.
             uploadErrMsg = uploadStatus[1]
             # srg debug why uploads stop
@@ -835,12 +846,23 @@ try:
                 perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
                 lastUploadMono = time.monotonic()
                 tmr_upload = lastUploadMono + UPLOAD_FREQUENCY_SECONDS # Set next upload time
+                uploadBackoff = UPLOAD_FREQUENCY_SECONDS
                 perfStats[STAT_UPLOADS] += 1
                 write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
                 if (debug):
                     print("HTTP Response: {}".format(uploadStatus))
             else:
-                errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.monotonic() - lastUploadMono)/60)
+                # Item 7: tmr_upload used to be advanced only on success, so during an outage
+                # every decoded packet (~2.5 s) triggered another attempt, each able to block
+                # for the full request timeout. The loop then spends nearly all its time inside
+                # requests: serial bytes pile up in the 4 KB tty buffer until it overflows
+                # mid-packet and framing desynchronises, and the 30 s heartbeat write is starved
+                # -- which is what makes a network outage look to the watchdog like a hung program.
+                # The cost of the 300 s ceiling is up to 300 s of extra downtime after the WAN
+                # comes back; the local data log keeps recording throughout either way.
+                uploadBackoff = min(uploadBackoff * 2, UPLOAD_BACKOFF_MAX_SECONDS)
+                tmr_upload = time.monotonic() + uploadBackoff
+                errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago, retrying in {}s".format((time.monotonic() - lastUploadMono)/60, uploadBackoff)
                 print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
                 perfStats[STAT_HTTP_FAIL] += 1
                 write_watchdog_status(last_error=uploadErrMsg)

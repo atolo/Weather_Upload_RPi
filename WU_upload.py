@@ -8,6 +8,19 @@ import WU_credentials  # Weather underground password, station IDs and API key
 import weatherData_cls # class to hold weather data for the Davis ISS station
 
 
+# Item 7: one Session for the life of the process, so the TCP + TLS handshake is not repeated
+# every 5 seconds. Split timeouts because the two failures are different: a dead WAN hangs the
+# connect, a wedged server hangs the read.
+#
+# Note what timeout= still does NOT cover: DNS. getaddrinfo() is a blocking libc call and a
+# resolver that is reachable but not answering -- a very common WAN-outage shape -- can hold the
+# main loop far longer than these values suggest. The backstop for that is systemd's
+# WatchdogSec=120 (item 29a), not anything in this file.
+CONNECT_TIMEOUT_SECONDS = 5
+READ_TIMEOUT_SECONDS = 10
+_session = requests.Session()
+
+
 def redact(text):
     """Strip PASSWORD= from anything headed for a log, the status file, or an alert email.
     requests/urllib3 exception messages frequently embed the full request URL, and the WU
@@ -55,7 +68,7 @@ def upload2WU(weatherData, stationID, uploadFreq=5):
     full_URL = full_URL + WU_software + WU_action
 
     try:
-        r = requests.get(full_URL, timeout=10) # send data to WU
+        r = _session.get(full_URL, timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS)) # send data to WU
 
         # If uploaded successfully, website will reply with 200
         if r.status_code == 200:

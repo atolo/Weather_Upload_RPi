@@ -2,21 +2,13 @@
 
 Run from the repo root:  python3 -m pytest tests/ -q
 
-These import watchdog_mailgun with WU_credentials and requests stubbed, so they run
-on any machine. Everything under test here is pure filesystem work.
+These import watchdog_mailgun with WU_credentials and requests stubbed by conftest.py,
+so they run on any machine. Everything under test here is pure filesystem work.
 """
 
 import json
-import os
-import sys
-import types
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-for _name in ("WU_credentials", "requests"):
-    sys.modules.setdefault(_name, types.ModuleType(_name))
 
 import watchdog_mailgun as wd
 
