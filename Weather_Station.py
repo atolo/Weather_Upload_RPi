@@ -44,6 +44,12 @@ WATCHDOG_STATUS_FILE = os.path.join(BASE_DIR, "Logs", "weather_status.json")
 CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
 CRC_RESET_COOLDOWN = 60            # seconds to wait between serial reset attempts
 
+# Serial silence recovery (item 29b). The CRC path above only fires when data is ARRIVING but
+# corrupt; it needs 12 consecutive failures. During the Aug 1-3 2026 outage only 7 failures
+# accrued in 47 hours because the link went silent, so that path was never reachable.
+SERIAL_SILENCE_TIMEOUT = 300       # seconds with no successfully decoded packet before resetting
+SERIAL_RESET_COOLDOWN = 60         # minimum seconds between silence-triggered reset attempts
+
 ISS_STATION_ID = 1
 WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
 # WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
@@ -555,6 +561,10 @@ hourTimer = time.time() + 3600
 g_crc_fail_count = 0   # consecutive CRC failure counter
 g_crc_last_reset = 0.0 # timestamp of last serial reset
 
+# Monotonic so an NTP step cannot make the link look healthy or trigger a spurious reset (item 27).
+lastValidPacketMono = time.monotonic()  # only a SUCCESSFUL decode may advance this
+lastSerialResetMono = 0.0               # tracked separately, so a failed reset cannot masquerade as recovery
+
 
 # List positions for perfStats[] list
 STAT_UPLOADS = 0           # 0 - W/U Uploads in last hour
@@ -592,6 +602,8 @@ try:
                     decodeStatus, decodeMessage = decodeRawData(g_rawDataNew)
                     if decodeStatus:
                         perfStats[STAT_ISS_SUCCESS] += 1
+                        perfStats[STAT_NEW_ISS_TIMESTAMP] = time.time() # item 17: was set once at startup and never updated
+                        lastValidPacketMono = time.monotonic()
                         # reset consecutive CRC failure counter on successful decode
                         g_crc_fail_count = 0
                         if debug:
@@ -640,6 +652,26 @@ try:
         except Exception as e:
             print(f"An error occurred: {e}")
             print(f"Last packet: {' '.join([f'{b:02x}' for b in g_rawDataNew])}")
+
+        # Item 29b: recover from a link that has gone SILENT, which the CRC path cannot see.
+        # Deliberately outside the read branch above -- when the ISS stops transmitting,
+        # ser.in_waiting stays 0 and none of that code runs.
+        nowMono = time.monotonic()
+        if ((nowMono - lastValidPacketMono) > SERIAL_SILENCE_TIMEOUT
+                and (nowMono - lastSerialResetMono) > SERIAL_RESET_COOLDOWN):
+            print("No valid ISS data for {:.0f}s, resetting serial port   {}".format(
+                nowMono - lastValidPacketMono, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+            # Only lastSerialResetMono is updated here. lastValidPacketMono stays put so a reset
+            # that did not fix anything keeps reporting the link as silent instead of looking healthy.
+            lastSerialResetMono = nowMono
+            try:
+                flush_input_buffer()
+            except Exception as e:
+                print(f"flush_input_buffer() error: {e}")
+            try:
+                reset_serial_port()
+            except Exception as e:
+                print(f"reset_serial_port() error: {e}")
 
         if time.time() >= watchdogHeartbeatTimer:
             write_watchdog_status()
