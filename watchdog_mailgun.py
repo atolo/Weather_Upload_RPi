@@ -75,8 +75,12 @@ def load_json(path, default):
         return default
 
 
-def _atomic_write_json(path, payload):
-    """Write JSON via a temp file + os.replace so a reader never sees a partial file."""
+def _atomic_write_json(path, payload, mode=0o644):
+    """Write JSON via a temp file + os.replace so a reader never sees a partial file.
+
+    mode is set explicitly because mkstemp() creates 0600 and os.replace preserves it.
+    These are status files whose whole purpose is to be observable; secrets are kept out
+    of them by redaction at source (item 33), not by permissions."""
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     handle_fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
@@ -85,6 +89,7 @@ def _atomic_write_json(path, payload):
             json.dump(payload, temp_file)
             temp_file.flush()
             os.fsync(temp_file.fileno())
+        os.chmod(temp_path, mode)
         os.replace(temp_path, path)   # atomic on POSIX
     except Exception:
         try:

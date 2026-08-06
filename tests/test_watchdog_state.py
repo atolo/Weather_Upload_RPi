@@ -53,6 +53,17 @@ def test_load_json_missing_file_returns_default(tmp_path):
     assert wd.load_json(str(tmp_path / "absent.json"), {"x": 1}) == {"x": 1}
 
 
+def test_write_sets_readable_mode_not_mkstemp_default(tmp_path):
+    """mkstemp() creates 0600 and os.replace preserves it, which silently made these
+    status files unreadable to anything but their owner. They exist to be observed."""
+    target = tmp_path / "state.json"
+    wd._atomic_write_json(str(target), {"a": 1})
+    assert oct(target.stat().st_mode & 0o777) == "0o644"
+
+    wd._atomic_write_json(str(target), {"a": 2}, mode=0o600)
+    assert oct(target.stat().st_mode & 0o777) == "0o600"
+
+
 def test_load_json_malformed_file_returns_default(tmp_path):
     corrupt = tmp_path / "state.json"
     corrupt.write_text("{not json")

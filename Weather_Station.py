@@ -473,10 +473,13 @@ def reset_serial_port():
         print(f"Exception in reset_serial_port(): {e}")
 
 
-def _atomic_write_json(path, payload):
+def _atomic_write_json(path, payload, mode=0o644):
     """Write JSON via a temp file + os.replace so a reader never sees a partial file.
     open(path, "w") truncates immediately, and the watchdog reads this file from another
-    process every 5 minutes -- a torn read there looks like a total station failure."""
+    process every 5 minutes -- a torn read there looks like a total station failure.
+
+    mode is set explicitly because mkstemp() creates 0600 and os.replace preserves it,
+    which would silently make these status files unreadable to anything but their owner."""
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     handle_fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
@@ -485,6 +488,7 @@ def _atomic_write_json(path, payload):
             json.dump(payload, temp_file)
             temp_file.flush()
             os.fsync(temp_file.fileno())
+        os.chmod(temp_path, mode)
         os.replace(temp_path, path)   # atomic on POSIX
     except Exception:
         try:
