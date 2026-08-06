@@ -34,12 +34,21 @@ MIN_VALID_PRESSURE_INHG = 25.0  # Minimum valid pressure reading in inches of Hg
 UPLOAD_FREQUENCY_SECONDS = 5  # Seconds between uploads to Weather Underground
 DETAIL_STATS_INTERVAL = 60  # Seconds between detail stats logging
 NO_UPLOAD_THRESHOLD = 300  # Seconds threshold for no upload warning
+SERIAL_PORT = "/dev/serial0"  # Davis ISS via the RS485 HAT
 SERIAL_BAUDRATE = 4800  # Davis weather station baud rate
 SERIAL_TIMEOUT = 3  # Serial port read timeout in seconds
+SERIAL_OPEN_ATTEMPTS = 10  # Startup retries before giving up and letting systemd restart us
+SERIAL_OPEN_DELAY = 3      # Seconds between those attempts
 LOG_RETENTION_DAYS = 7  # Delete dated log files older than this many days
 WATCHDOG_HEARTBEAT_SECONDS = 30
+# Item 6: every path this program touches is anchored to the script directory. Relative paths
+# in a daemon are silently wrong the moment WorkingDirectory changes -- either os.makedirs("Logs")
+# raises PermissionError trying to create /Logs and the process dies before the main loop's
+# handler exists, or the logs land somewhere else while the watchdog keeps reading the old
+# location, sees a heartbeat that never updates, and reboots forever.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WATCHDOG_STATUS_FILE = os.path.join(BASE_DIR, "Logs", "weather_status.json")
+LOGS_DIR = os.path.join(BASE_DIR, "Logs")
+WATCHDOG_STATUS_FILE = os.path.join(LOGS_DIR, "weather_status.json")
 
 # CRC / serial recovery settings
 CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
@@ -69,12 +78,28 @@ ISS_WIND_GUST    = 0x9
 ISS_HUMIDITY     = 0xA
 ISS_RAIN_COUNT   = 0xE
 
-# Configure the serial port
-ser = serial.Serial(
-    port='/dev/serial0',  # Replace with your serial port
-    baudrate=SERIAL_BAUDRATE,
-    timeout=SERIAL_TIMEOUT
-)
+# Configure the serial port.
+# Item 5: this used to be an unguarded module-level serial.Serial(). If /dev/serial0 was missing
+# or briefly busy when systemd started the unit -- entirely possible on a cold boot, since nothing
+# orders this unit after the tty device appears -- the process died on a traceback before it could
+# log anything useful. Retry like the BME280 init below, which already got this right, then exit
+# non-zero so systemd restarts cleanly rather than the unit dying on an import-time exception.
+def open_serial(attempts=SERIAL_OPEN_ATTEMPTS, delay=SERIAL_OPEN_DELAY):
+    for attempt in range(attempts):
+        try:
+            port = serial.Serial(port=SERIAL_PORT, baudrate=SERIAL_BAUDRATE, timeout=SERIAL_TIMEOUT)
+            if attempt > 0:
+                print(f"Serial port {SERIAL_PORT} opened on attempt {attempt+1}")
+            return port
+        except Exception as e:
+            print(f"Serial open failed (attempt {attempt+1}/{attempts}): {e}")
+            time.sleep(delay)
+    # Worst case is attempts*delay seconds before READY=1, which must stay well inside
+    # systemd's default TimeoutStartSec of 90 s. 10 x 3 s plus the BME280's 5 x 1 s is ~35 s.
+    raise SystemExit(f"Could not open {SERIAL_PORT} after {attempts} attempts")
+
+
+ser = open_serial()
 
 # Initialize BME280 sensor once at startup (retry a few times in case I2C not ready)
 bme280_initialized = False
@@ -332,20 +357,19 @@ def logFile(newFile, logType, logData):
         if retention_days <= 0:
             return
 
-        logs_dir = "Logs"
-        if not os.path.isdir(logs_dir):
+        if not os.path.isdir(LOGS_DIR):
             return
 
         cutoff_seconds = time.time() - (retention_days * 86400)
         log_prefixes = ("Upload Data_", "Error log_")
 
-        for filename in os.listdir(logs_dir):
+        for filename in os.listdir(LOGS_DIR):
             if not filename.endswith(".txt"):
                 continue
             if not filename.startswith(log_prefixes):
                 continue
 
-            filepath = os.path.join(logs_dir, filename)
+            filepath = os.path.join(LOGS_DIR, filename)
             try:
                 file_mtime = os.path.getmtime(filepath)
                 if file_mtime < cutoff_seconds:
@@ -354,11 +378,11 @@ def logFile(newFile, logType, logData):
             except Exception as e:
                 print(f"Warning: Failed to prune old log '{filepath}': {e}")
 
-    datafilename =  "Logs/Upload Data_" + time.strftime("%y%m%d") + ".txt"
-    errorfilename = "Logs/Error log_"   + time.strftime("%y%m%d") + ".txt"
+    datafilename =  os.path.join(LOGS_DIR, "Upload Data_" + time.strftime("%y%m%d") + ".txt")
+    errorfilename = os.path.join(LOGS_DIR, "Error log_"   + time.strftime("%y%m%d") + ".txt")
 
     if (newFile == True):
-        os.makedirs("Logs", exist_ok=True)
+        os.makedirs(LOGS_DIR, exist_ok=True)
 
         # Remove old log files before creating today's files.
         prune_old_logs(LOG_RETENTION_DAYS)
@@ -427,7 +451,7 @@ def logFileDetail():
     print(detailLogOutput)
 
 
-    detailErrFilename = "Logs/Detail Error log.txt"
+    detailErrFilename = os.path.join(LOGS_DIR, "Detail Error log.txt")
     with open(detailErrFilename, "a") as detErrlog:
         detErrlog.write(detailLogOutput)
         detErrlog.write('\n')
@@ -466,7 +490,7 @@ def reset_serial_port():
             pass
         time.sleep(0.5)
         try:
-            ser = serial.Serial(port=ser.port, baudrate=SERIAL_BAUDRATE, timeout=SERIAL_TIMEOUT)
+            ser = serial.Serial(port=SERIAL_PORT, baudrate=SERIAL_BAUDRATE, timeout=SERIAL_TIMEOUT)
             print("Serial port reopened successfully")
         except Exception as e:
             print(f"Failed to reopen serial port: {e}")
@@ -538,10 +562,19 @@ def write_watchdog_status(last_upload=None, last_error=None, started_at=None):
 #---------------------------------------------------------------------
 # Start up 
 #---------------------------------------------------------------------
-IP = check_output(['hostname', '-I'])
-IP = IP.rstrip()  # strips off eol characters
-IP = IP.decode('utf-8') # removes b' previx
-print("RPi IP Address: {}".format(IP)) 
+# Item 20: this is a cosmetic diagnostic print, but it ran before the main loop's exception
+# handler existed, so a non-zero exit from hostname(1) -- or the binary simply not being on
+# PATH -- killed the station at startup. A weather station that cannot name its own IP address
+# should still measure the weather.
+def get_ip_address():
+    try:
+        return check_output(['hostname', '-I'], timeout=10).rstrip().decode('utf-8')
+    except Exception as e:
+        print(f"Warning: could not determine IP address: {e}")
+        return "unknown"
+
+
+print("RPi IP Address: {}".format(get_ip_address()))
 print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
 # Serial port and BME280 are already open by this point, so the service is functional.
