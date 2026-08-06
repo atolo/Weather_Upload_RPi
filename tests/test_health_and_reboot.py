@@ -71,6 +71,53 @@ class TestUploadStaleness:
         assert any("upload stale" in i for i in wd.evaluate_health(status, NOW))
 
 
+class TestClockSteps:
+    """Item 27: the uploader's timestamps are wall-clock because they cross a process boundary,
+    and the Pi has no RTC. An NTP step must not be mistaken for evidence about the station."""
+
+    UPTIME = 86_400.0  # up one day, so nothing legitimately predates this boot
+
+    def test_backward_step_makes_timestamps_look_future_and_is_tolerated(self):
+        """Clock stepped back an hour after the uploader wrote a fresh heartbeat."""
+        status = {"last_heartbeat": NOW + 3000, "last_successful_upload": NOW + 3000}
+        assert wd.evaluate_health(status, NOW, uptime=self.UPTIME) == []
+
+    def test_absurdly_future_timestamp_is_reported_not_ignored(self):
+        """Beyond plausible skew, silence would blind the watchdog indefinitely."""
+        status = {"last_heartbeat": NOW + wd.MAX_FUTURE_SECONDS + 60}
+        assert any("in the future" in i for i in wd.evaluate_health(status, NOW, uptime=self.UPTIME))
+
+    def test_small_skew_within_tolerance_still_reads_as_healthy(self):
+        status = {"last_heartbeat": NOW + 30, "last_successful_upload": NOW + 30}
+        assert wd.evaluate_health(status, NOW, uptime=self.UPTIME) == []
+
+    def test_heartbeat_older_than_uptime_is_still_an_issue(self):
+        """The important non-suppression: reboot, uploader fails to start, heartbeat is
+        frozen before boot forever. Ignoring this case would hide a dead station."""
+        status = {"last_heartbeat": NOW - 5000, "last_successful_upload": NOW}
+        issues = wd.evaluate_health(status, NOW, uptime=600.0)
+        assert any("predates this boot" in i for i in issues)
+
+    def test_stale_within_uptime_reads_as_ordinary_staleness(self):
+        status = {"last_heartbeat": NOW - 5000, "last_successful_upload": NOW}
+        issues = wd.evaluate_health(status, NOW, uptime=self.UPTIME)
+        assert any("heartbeat stale" in i for i in issues)
+
+    def test_unknown_uptime_never_claims_a_boot_relationship(self):
+        """get_uptime_seconds() fails open with a huge value; None must behave the same way."""
+        status = {"last_heartbeat": NOW - 5000, "last_successful_upload": NOW}
+        issues = wd.evaluate_health(status, NOW, uptime=None)
+        assert any("heartbeat stale" in i for i in issues)
+        assert not any("predates" in i for i in issues)
+
+    def test_stale_upload_survives_the_clock_guard(self):
+        status = {
+            "last_heartbeat": NOW,
+            "last_successful_upload": NOW - (wd.STALE_UPLOAD_SECONDS + 1),
+        }
+        assert any("upload stale" in i for i in wd.evaluate_health(status, NOW, uptime=self.UPTIME))
+
+
 class TestRebootCooldown:
     """Item 1: the old reboot_triggered boolean was reset by any single clean pass. Because
     startup wrote a fake upload timestamp, every boot produced exactly one clean pass, which

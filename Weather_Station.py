@@ -406,11 +406,13 @@ def logFile(newFile, logType, logData):
 ##    - ISS Fail
 ##    - ISS Success
 #---------------------------------------------------------------------
-detailStatTimer = time.time() + DETAIL_STATS_INTERVAL  # global variable to print logFileDetail every minute if no w/u uploads
+detailStatTimer = time.monotonic() + DETAIL_STATS_INTERVAL  # global variable to print logFileDetail every minute if no w/u uploads
 def logFileDetail():
 
-    lastUploadMin = round((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/20,2)  # minutes since last W/U upload
-    minSinceLastNewISSData = (time.time() - perfStats[STAT_NEW_ISS_TIMESTAMP])/60
+    # Elapsed times come from the monotonic clock (item 27). The wall-clock copies in perfStats[]
+    # exist to cross the process boundary into the status file; they are not safe for arithmetic.
+    lastUploadMin = round((time.monotonic() - lastUploadMono)/60,2)  # minutes since last W/U upload
+    minSinceLastNewISSData = (time.monotonic() - lastValidPacketMono)/60
 ##    detailLogData = [g_moteinoReady,
 ##                     moteinoTimer,
 ##                     isHeartbeatOK(),
@@ -450,7 +452,7 @@ def flush_input_buffer():
 def reset_serial_port():
     """Try progressively stronger serial recovery: flush, then close+reopen.
     Keeps `ser` in module scope and handles exceptions gracefully."""
-    global ser, g_crc_last_reset
+    global ser, g_crc_last_reset_mono
     try:
         print("Attempting serial flush and reset")
         try:
@@ -468,7 +470,7 @@ def reset_serial_port():
             print("Serial port reopened successfully")
         except Exception as e:
             print(f"Failed to reopen serial port: {e}")
-        g_crc_last_reset = time.time()
+        g_crc_last_reset_mono = time.monotonic()
     except Exception as e:
         print(f"Exception in reset_serial_port(): {e}")
 
@@ -588,12 +590,17 @@ g_TableHeaderCntr1 = 0 # Used to print header for weather data summary every so 
 g_i2cDailyErrors = 0 # Daily counter for I2C errors
 g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
-tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
-hourTimer = time.time() + 3600
 g_crc_fail_count = 0   # consecutive CRC failure counter
-g_crc_last_reset = 0.0 # timestamp of last serial reset
 
-# Monotonic so an NTP step cannot make the link look healthy or trigger a spurious reset (item 27).
+# Item 27: every INTERVAL is measured on the monotonic clock. time.time() is the wall clock and the
+# Pi has no RTC, so NTP steps it -- sometimes by hours. A forward step fires every deadline at once
+# and corrupts the elapsed-time stats; a backward step pushes every deadline into the future, which
+# stops uploads silently, with no error and no log line, until the clock catches up.
+# Wall-clock time is kept only for things that must be human-readable or must cross the process
+# boundary into the status file, where a monotonic value would be meaningless to the watchdog.
+tmr_upload = time.monotonic()     # Initialize timer to trigger when to upload to Weather Underground
+hourTimer = time.monotonic() + 3600
+g_crc_last_reset_mono = 0.0       # monotonic timestamp of last serial reset
 lastValidPacketMono = time.monotonic()  # only a SUCCESSFUL decode may advance this
 lastSerialResetMono = 0.0               # tracked separately, so a failed reset cannot masquerade as recovery
 
@@ -608,7 +615,10 @@ STAT_ISS_FAIL = 5          # 5 - ISS Packet decode errors in last hour
 STAT_ISS_SUCCESS = 6       # 6 - Average time (seconds) to receive ISS packet in last hour
 STAT_NEW_ISS_TIMESTAMP = 7 # 7 - Timestamp of last time received NEW weather data.  Not reset every hour. This seems to be the main problem when uploads stop - Moteino keeps sending the same packet
 perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance stats
-watchdogHeartbeatTimer = time.time() + WATCHDOG_HEARTBEAT_SECONDS
+# Monotonic companion to STAT_UPLOAD_TIMESTAMP. The perfStats entry stays wall-clock because it is
+# written into the status file for the watchdog; this one is what the program itself measures against.
+lastUploadMono = time.monotonic()
+watchdogHeartbeatTimer = time.monotonic() + WATCHDOG_HEARTBEAT_SECONDS
 # Item 1: this used to write last_upload=<startup time>, claiming a successful upload that had
 # not happened. Any previously recorded last_successful_upload is left untouched.
 write_watchdog_status(started_at=time.time())
@@ -636,6 +646,8 @@ try:
                     decodeStatus, decodeMessage = decodeRawData(g_rawDataNew)
                     if decodeStatus:
                         perfStats[STAT_ISS_SUCCESS] += 1
+                        # Wall-clock record of the last good packet, kept human-readable for
+                        # diagnostics. Elapsed-time decisions use lastValidPacketMono (item 27).
                         perfStats[STAT_NEW_ISS_TIMESTAMP] = time.time() # item 17: was set once at startup and never updated
                         lastValidPacketMono = time.monotonic()
                         # reset consecutive CRC failure counter on successful decode
@@ -658,7 +670,7 @@ try:
                             g_crc_fail_count = 0
 
                         # If CRC failures accumulate, attempt to flush/reopen serial
-                        if g_crc_fail_count >= CRC_FAIL_THRESHOLD and (time.time() - g_crc_last_reset) > CRC_RESET_COOLDOWN:
+                        if g_crc_fail_count >= CRC_FAIL_THRESHOLD and (time.monotonic() - g_crc_last_reset_mono) > CRC_RESET_COOLDOWN:
                             print(f"CRC failure threshold reached ({g_crc_fail_count}), attempting serial reset")
                             try:
                                 flush_input_buffer()
@@ -707,9 +719,9 @@ try:
             except Exception as e:
                 print(f"reset_serial_port() error: {e}")
 
-        if time.time() >= watchdogHeartbeatTimer:
+        if time.monotonic() >= watchdogHeartbeatTimer:
             write_watchdog_status()
-            watchdogHeartbeatTimer = time.time() + WATCHDOG_HEARTBEAT_SECONDS
+            watchdogHeartbeatTimer = time.monotonic() + WATCHDOG_HEARTBEAT_SECONDS
         
     
         # If it's a new day, reset daily rain accumulation and I2C Error counter
@@ -725,7 +737,7 @@ try:
 
         # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
         # and R/H) then upload new data to Weather Underground
-        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.time() > tmr_upload)):
+        if ((suntec.gotDewPointData() == True) and (decodeStatus == True) and (time.monotonic() > tmr_upload)):
             newPressure = getAtmosphericPressure() # get latest pressure from bme280
             if (newPressure > MIN_VALID_PRESSURE_INHG):
                 suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
@@ -737,42 +749,43 @@ try:
             uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.
             uploadErrMsg = uploadStatus[1]
             # srg debug why uploads stop
-            if (time.time() > (perfStats[STAT_UPLOAD_TIMESTAMP] + NO_UPLOAD_THRESHOLD) ):  # srg debug
+            if ((time.monotonic() - lastUploadMono) > NO_UPLOAD_THRESHOLD):  # srg debug
                 print("(debug) HTTP Response: {}".format(uploadStatus))    # srg debug
             if uploadStatus[0] == True:
                 perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
-                tmr_upload = time.time() + UPLOAD_FREQUENCY_SECONDS # Set next upload time
+                lastUploadMono = time.monotonic()
+                tmr_upload = lastUploadMono + UPLOAD_FREQUENCY_SECONDS # Set next upload time
                 perfStats[STAT_UPLOADS] += 1
                 write_watchdog_status(last_upload=perfStats[STAT_UPLOAD_TIMESTAMP])
                 if (debug):
                     print("HTTP Response: {}".format(uploadStatus))
             else:
-                errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
+                errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful upload: {:.1f} minutes ago".format((time.monotonic() - lastUploadMono)/60)
                 print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
                 perfStats[STAT_HTTP_FAIL] += 1
                 write_watchdog_status(last_error=uploadErrMsg)
 
         # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
-        if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > NO_UPLOAD_THRESHOLD)):
+        if ( (time.monotonic() > detailStatTimer) and ((time.monotonic() - lastUploadMono) > NO_UPLOAD_THRESHOLD)):
             try:
                 logFileDetail()
             except Exception as e:
                 print(f"Error in logFileDetail(): {e}")
-            detailStatTimer = time.time() + DETAIL_STATS_INTERVAL # reset timer
+            detailStatTimer = time.monotonic() + DETAIL_STATS_INTERVAL # reset timer
 
         # Every hour print and then reset some stats for debugging
-        if (time.time() > hourTimer):
-            stats = "   {}\t    {}\t\t  {:.2f}\t\t  {}\t\t  {:.2f}\t  {:.2f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], 
-                                                                            (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/3600, 
+        if (time.monotonic() > hourTimer):
+            stats = "   {}\t    {}\t\t  {:.2f}\t\t  {}\t\t  {:.2f}\t  {:.2f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL],
+                                                                            (time.monotonic() - lastUploadMono)/3600,
                                                                             perfStats[STAT_ISS_FAIL], perfStats[STAT_ISS_SUCCESS]/3600,
-                                                                            (time.time() - perfStats[STAT_NEW_ISS_TIMESTAMP])/60 )
+                                                                            (time.monotonic() - lastValidPacketMono)/60 )
             logFile(False, "Error", stats)
 
             # Reset hourly stats
             perfStats[STAT_UPLOADS] = 0
             perfStats[STAT_HTTP_FAIL] = 0
             perfStats[STAT_ISS_SUCCESS] = 0
-            hourTimer = time.time() + 3600
+            hourTimer = time.monotonic() + 3600
 
 except KeyboardInterrupt:
     print("\nShutting down gracefully...")

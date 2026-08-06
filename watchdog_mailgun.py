@@ -26,6 +26,12 @@ REBOOT_ENABLED = os.getenv("WATCHDOG_REBOOT_ENABLED", "true").strip().lower() in
 # healthy for one cycle after a reboot could be rebooted again immediately. A timestamp
 # cannot be cleared by recovery.
 MIN_SECONDS_BETWEEN_REBOOTS = int(os.getenv("WATCHDOG_MIN_SECONDS_BETWEEN_REBOOTS", "21600"))
+# Item 27: the uploader's timestamps are wall-clock because they have to cross a process boundary,
+# and the Pi has no RTC -- NTP steps the clock, sometimes by hours. These bound how far a timestamp
+# may disagree with this process's own clock before it is treated as a clock fault rather than as
+# evidence about the station.
+CLOCK_SKEW_TOLERANCE_SECONDS = int(os.getenv("WATCHDOG_CLOCK_SKEW_TOLERANCE_SECONDS", "120"))
+MAX_FUTURE_SECONDS = int(os.getenv("WATCHDOG_MAX_FUTURE_SECONDS", "3600"))
 
 def get_credential(attr_candidates, env_name):
     env_value = os.getenv(env_name, "").strip()
@@ -178,19 +184,54 @@ def send_mailgun_email(subject, body):
         return False
 
 
-def evaluate_health(status, now, no_upload_since=None):
+def staleness_issue(label, timestamp, now, limit, uptime=None):
+    """Judge one wall-clock timestamp written by the uploader, tolerating clock steps (item 27).
+
+    Returns an issue string, or None when the field is healthy or cannot be judged.
+
+    Three cases beyond plain staleness:
+
+    * Timestamp in the near future -- the clock stepped backward after it was written. Its age is
+      meaningless, so report nothing. This cannot hide a dead uploader for long: once the clock
+      catches up the timestamp stops being in the future and normal staleness resumes.
+    * Timestamp far in the future -- too large to be ordinary skew. That is itself a fault worth
+      reporting, and reporting it beats silently ignoring the field forever.
+    * Timestamp older than the machine's uptime -- it was written before this boot, so either the
+      uploader has not run since boot (real, and the reason this case is NOT suppressed) or the
+      clock stepped forward. Say which shape it is; a forward step self-heals at the next 30 s
+      heartbeat, so it can poison at most one run out of the three needed to reboot.
+    """
+    skew = timestamp - now
+    if skew > MAX_FUTURE_SECONDS:
+        return f"{label} timestamp is {int(skew)}s in the future"
+    if skew > CLOCK_SKEW_TOLERANCE_SECONDS:
+        return None
+
+    age = now - timestamp
+    if age <= limit:
+        return None
+    if uptime is not None and age > (uptime + CLOCK_SKEW_TOLERANCE_SECONDS):
+        return (f"{label} predates this boot ({format_age(now, timestamp)} old, "
+                f"uptime {int(uptime)}s)")
+    return f"{label} stale for {format_age(now, timestamp)}"
+
+
+def evaluate_health(status, now, no_upload_since=None, uptime=None):
     issues = []
 
     last_heartbeat = status.get("last_heartbeat")
     if not isinstance(last_heartbeat, (int, float)):
         issues.append("missing heartbeat timestamp")
-    elif (now - last_heartbeat) > STALE_HEARTBEAT_SECONDS:
-        issues.append(f"heartbeat stale for {format_age(now, last_heartbeat)}")
+    else:
+        issue = staleness_issue("heartbeat", last_heartbeat, now, STALE_HEARTBEAT_SECONDS, uptime)
+        if issue:
+            issues.append(issue)
 
     last_upload = status.get("last_successful_upload")
     if isinstance(last_upload, (int, float)):
-        if (now - last_upload) > STALE_UPLOAD_SECONDS:
-            issues.append(f"upload stale for {format_age(now, last_upload)}")
+        issue = staleness_issue("upload", last_upload, now, STALE_UPLOAD_SECONDS, uptime)
+        if issue:
+            issues.append(issue)
     elif no_upload_since is not None:
         # No upload has ever been recorded. Measure from when this watchdog first noticed,
         # not from now, so a fresh install gets a real grace period -- but unlike the
@@ -213,7 +254,8 @@ def reboot_pi():
 def main():
     now = time.time()
 
-    if get_uptime_seconds() < BOOT_GRACE_SECONDS:
+    uptime = get_uptime_seconds()
+    if uptime < BOOT_GRACE_SECONDS:
         print("Boot grace window active; watchdog check skipped")
         return
 
@@ -236,7 +278,7 @@ def main():
     elif not isinstance(state.get("no_upload_since"), (int, float)):
         state["no_upload_since"] = now
 
-    issues = evaluate_health(status, now, state.get("no_upload_since"))
+    issues = evaluate_health(status, now, state.get("no_upload_since"), uptime)
 
     if issues:
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
