@@ -26,7 +26,7 @@ from subprocess import check_output # used to print RPi IP address
 import serial
 
 # Configuration constants
-debug = True
+debug = os.getenv("WEATHER_DEBUG", "0") == "1"  # per-packet tracing; off by default to keep the journal readable
 ELEVATION_METERS = 26  # Replace with your actual elevation in meters
 MIN_VALID_PRESSURE_INHG = 25.0  # Minimum valid pressure reading in inches of Hg
 UPLOAD_FREQUENCY_SECONDS = 5  # Seconds between uploads to Weather Underground

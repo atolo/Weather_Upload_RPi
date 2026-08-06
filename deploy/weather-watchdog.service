@@ -1,0 +1,10 @@
+[Unit]
+Description=Weather Station Watchdog (Mailgun)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
+ExecStart=/usr/bin/python3 /home/pi/weather/Weather_Upload_RPi/watchdog_mailgun.py
+EnvironmentFile=-/etc/default/weather-watchdog

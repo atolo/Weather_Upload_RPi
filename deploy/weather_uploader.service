@@ -1,0 +1,15 @@
+[Unit]
+Description=Weather_Upload_RPi service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/weather/Weather_Upload_RPi
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/weather/Weather_Upload_RPi/venv/bin/python /home/pi/weather/Weather_Upload_RPi/Weather_Station.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
