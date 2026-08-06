@@ -553,9 +553,18 @@ def load_rain_state():
     """Today's stored rain total, or 0.0 if there isn't a usable one.
 
     A stored date other than today is not an error -- it is the normal state after midnight,
-    and 0.0 is the correct answer."""
+    and 0.0 is the correct answer.
+
+    A MISSING file is different, and is called out loudly. It means this station has no local
+    rain history at all: a first deploy, a fresh Pi, or a wiped Logs/. Starting from 0.0 is the
+    only honest answer available -- there is deliberately no network fallback any more -- but if
+    it has already rained today, the published daily total silently steps backwards until
+    midnight. That happened on the very first deploy of this code, on a 1.6" day."""
     try:
         if not os.path.exists(RAIN_STATE_FILE):
+            print(f"NOTE: no local rain state at {RAIN_STATE_FILE}; daily rain starts at 0.00. "
+                  f"If it has already rained today, stop this service, write "
+                  f'{{"date": "{time.strftime("%y%m%d")}", "rain_today": <inches>}} there, and start it again.')
             return 0.0
 
         with open(RAIN_STATE_FILE, "r") as state_file:

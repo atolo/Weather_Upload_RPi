@@ -321,7 +321,34 @@ regardless, but make it tidy:
 sudo chown pi:pi /home/pi/weather/Weather_Upload_RPi/Logs/watchdog_state.json
 ```
 
-### 6.2 Verifying the privilege drop
+### 6.2 Seed the daily rain total if it has already rained today
+
+**Do this before the restart, not after.** The day's rain accumulation lives in
+`Logs/rain_state.json` and nowhere else — there is deliberately no network fallback (item 37). On a
+first deploy, a fresh Pi, or after wiping `Logs/`, that file does not exist, so the station starts
+the day at `0.00"` and the public WU page steps backwards until midnight.
+
+This is not hypothetical: the first deploy of that change landed mid-afternoon on a **1.59"** day and
+published `0.01` for the rest of it.
+
+Check today's total first — the ninth column of the data log, or the station's WU page:
+
+```bash
+awk -F'\t' 'NR>1{if($9+0>m) m=$9+0} END{print m}' "Logs/Upload Data_$(date +%y%m%d).txt"
+```
+
+If it is non-zero, stop the uploader, write the file, and start it again — in that order, or the
+running process overwrites your value on the next bucket tip:
+
+```bash
+sudo systemctl stop weather_uploader && printf '{"date": "%s", "rain_today": %s}' "$(date +%y%m%d)" "1.59" > Logs/rain_state.json && sudo systemctl start weather_uploader
+```
+
+The startup line confirms it: `Daily rain restored from local state: 1.59"`. When the file is absent
+the service says so explicitly in the journal, so this is visible at deploy time rather than on the
+public page a day later.
+
+### 6.3 Verifying the privilege drop
 
 ```bash
 sudo -l -U pi | grep -A3 NOPASSWD
@@ -333,7 +360,7 @@ Must list exactly the two `systemctl` commands. Then confirm the watchdog is no 
 systemctl show weather-watchdog.service -p User -p Group
 ```
 
-### 6.3 Optional tuning — `/etc/default/weather-watchdog`
+### 6.4 Optional tuning — `/etc/default/weather-watchdog`
 
 Absent by default, which means all defaults apply **and rebooting is enabled**. Create it only to
 override:
@@ -509,9 +536,13 @@ Read before building a fresh Pi.
 5. **No RTC.** A boot without internet runs on a `fake-hwclock` estimate until NTP corrects it. All
    intervals are measured on the monotonic clock so a step cannot stall uploads (item 27), but log
    filenames and line timestamps are wall-clock and can still be misdated.
-6. **Watchdog can reboot the Pi.** Defaults are active unless `/etc/default/weather-watchdog` says
-   otherwise. Disable rebooting during commissioning (§6.3).
-7. **Tests cover the watchdog, not the station.** `pytest tests/` runs on any machine, but
+6. **Daily rain has exactly one home.** `Logs/rain_state.json` and nothing else — no network
+   fallback by design (item 37). A first deploy or a fresh build mid-day starts at `0.00` and the
+   public page steps backwards until midnight unless it is seeded (§6.2). The journal says so at
+   startup when the file is missing.
+7. **Watchdog can reboot the Pi.** Defaults are active unless `/etc/default/weather-watchdog` says
+   otherwise. Disable rebooting during commissioning (§6.4).
+8. **Tests cover the watchdog, not the station.** `pytest tests/` runs on any machine, but
    `Weather_Station.py` still opens the serial port and the BME280 at import, so its main loop has no
    coverage. Verify a change by watching the actual WU station page, not just the local logs.
 
@@ -525,11 +556,13 @@ What is **not** in git and must be restored separately:
 |---|---|
 | `WU_credentials.py` | Your password manager. Keep a copy there — losing it means re-issuing the WU key and Mailgun credentials. |
 | The three systemd units + sudoers rule | `deploy/` in this repo — see §6.1 |
-| `/etc/default/weather-watchdog` | §6.3, if you created one |
+| `/etc/default/weather-watchdog` | §6.4, if you created one |
 | OS-level config (UART, I2C, timezone, journald) | §4 |
+| `Logs/rain_state.json` | Nothing else holds the day's rain total. Copy it across, or re-seed by hand per §6.2, or the new Pi publishes `0.00` for the rest of the day. |
 | `Logs/` history | Not recoverable. Back it up if the record matters. |
 
 Minimum rebuild: §4 → §5 → §6 → §7. Budget an hour, most of it OS install and `apt full-upgrade`.
 
-**Before wiping the old Pi**, take the §3 capture and copy `Logs/` off it. The audit was only possible
-because those log files survived.
+**Before wiping the old Pi**, take the §3 capture and copy `Logs/` off it — including
+`rain_state.json` if the rebuild is happening on a wet day. The audit was only possible because those
+log files survived.
