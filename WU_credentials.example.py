@@ -5,9 +5,9 @@
 #
 # WU_credentials.py is gitignored and must never be committed.
 #
-# Every name below is read somewhere in the codebase. A missing name surfaces as
-# an AttributeError at startup with no useful message, so define all of them --
-# use an empty string for anything you are not using.
+# Define every name below, even the ones you are not using: a missing name surfaces
+# as an AttributeError at startup with no useful message. An empty string is fine.
+# Where a name is no longer read by any code, it says so.
 
 # --- Weather Underground ----------------------------------------------------
 
@@ -16,25 +16,20 @@
 # Used by: WU_upload.py
 WU_PASSWORD = "your-pws-key-here"
 
-# API key for the api.weather.com observations endpoint (used to recover the
-# day's rain accumulation on restart, so a reboot mid-day doesn't zero it).
-# Same page as above.
-# Used by: WU_download.py
-WU_API_KEY = "your-api-key-here"
+# API key for the api.weather.com observations endpoint.
+# No longer read by anything: the only caller was WU_download.getDailyRain(), which is
+# gone (AUDIT_PLAN item 37 -- the day's rain total is now kept locally in
+# Logs/rain_state.json, which works with the WAN down). Keep the value if you intend to
+# query the API by hand; it is safe to leave empty.
+WU_API_KEY = ""
 
 # Your station's WU ID, e.g. "KXXNNNN1234".
-# Used by: Weather_Station.py, WU_download.py
+# Used by: Weather_Station.py
 WU_STATION_ID_SUNTEC = "KXXNNNN1234"
 
 # Optional second station ID for testing without polluting the live feed.
-# Swap it in at Weather_Station.py:47-48.
+# Swap it in at Weather_Station.py:55-56.
 WU_STATION_ID_TEST = ""
-
-# Nearby PWS IDs, formerly used to borrow barometric pressure before the BME280
-# was fitted. Only read by WU_download.getPressure(), which is now dead code
-# (see AUDIT_PLAN.md item 24). Kept so the import does not fail; set to () once
-# getPressure() is deleted.
-WU_LOCAL_STATIONS = ()
 
 
 # --- Mailgun (watchdog alerting) --------------------------------------------

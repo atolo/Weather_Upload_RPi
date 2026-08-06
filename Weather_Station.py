@@ -19,7 +19,6 @@ import board
 from adafruit_bme280 import basic as adafruit_bme280
 #import RPi.GPIO as GPIO # reads/writes GPIO pins
 import WU_credentials # Weather underground password, API key and station IDs
-import WU_download  # downloads daily rain on startup, and pressure from other weather staitons
 import WU_upload  # uploads data to Weather Underground
 import WU_decodeData # Decodes wireless data coming from Davis ISS weather station
 import weatherData_cls # class to hold weather data for the Davis ISS station
@@ -49,6 +48,8 @@ WATCHDOG_HEARTBEAT_SECONDS = 30
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BASE_DIR, "Logs")
 WATCHDOG_STATUS_FILE = os.path.join(LOGS_DIR, "weather_status.json")
+RAIN_STATE_FILE = os.path.join(LOGS_DIR, "rain_state.json")
+MAX_PLAUSIBLE_DAILY_RAIN_IN = 10.0  # Sanity bound on a restored daily total, inches
 
 # CRC / serial recovery settings
 CRC_FAIL_THRESHOLD = 12            # number of consecutive CRC failures before attempting recovery
@@ -187,7 +188,8 @@ def decodeRawData(packet):
             
             suntec.rainToday += newRain/100.0;  # Increment daily rain counter
             g_rainCounterOld = rainCounterNew
-                
+            save_rain_state()  # item 37: survive a restart. Only fires on a bucket tip.
+
         g_rainCntDataPts += 1 # Increment number times RPi received rain count data
 
         return (True, "Rain count data processed")
@@ -524,6 +526,54 @@ def _atomic_write_json(path, payload, mode=0o644):
         raise
 
 
+#---------------------------------------------------------------------
+# Daily rain persistence (item 37)
+#
+# The ISS transmits a cumulative bucket-tip counter, not a daily total; suntec.rainToday is
+# accumulated in memory and so resets to 0.0 on every restart. This used to be repaired by
+# WU_download.getDailyRain(), which read the station's own previously published total back out
+# of Weather Underground -- a network call, at startup, whose only purpose was to survive the
+# outages during which it could not possibly work. A WAN outage plus a restart therefore
+# published dailyrainin=0.00 after real rain had fallen, and the public page stepped backwards.
+#
+# Two fields are enough to do this locally and offline. Writes happen only on a bucket tip.
+#---------------------------------------------------------------------
+def save_rain_state():
+    try:
+        _atomic_write_json(RAIN_STATE_FILE, {
+            "date": time.strftime("%y%m%d"),
+            "rain_today": round(suntec.rainToday, 2),
+        })
+    except Exception as e:
+        print(f"Warning: could not save rain state: {e}")
+
+
+def load_rain_state():
+    """Today's stored rain total, or 0.0 if there isn't a usable one.
+
+    A stored date other than today is not an error -- it is the normal state after midnight,
+    and 0.0 is the correct answer."""
+    try:
+        if not os.path.exists(RAIN_STATE_FILE):
+            return 0.0
+
+        with open(RAIN_STATE_FILE, "r") as state_file:
+            state = json.load(state_file)
+
+        if state.get("date") != time.strftime("%y%m%d"):
+            return 0.0
+
+        rain_today = float(state.get("rain_today", 0.0))
+        if 0.0 <= rain_today < MAX_PLAUSIBLE_DAILY_RAIN_IN:
+            return rain_today
+
+        print(f"Ignoring implausible stored daily rain: {rain_today}")
+    except Exception as e:
+        print(f"Warning: could not read rain state, starting from 0.0: {e}")
+
+    return 0.0
+
+
 def write_watchdog_status(last_upload=None, last_error=None, started_at=None):
     try:
         os.makedirs(os.path.dirname(WATCHDOG_STATUS_FILE), exist_ok=True)
@@ -577,10 +627,12 @@ def get_ip_address():
 print("RPi IP Address: {}".format(get_ip_address()))
 print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
-# Serial port and BME280 are already open by this point, so the service is functional.
-# READY=1 is deliberately sent BEFORE the startup network calls below: under Type=notify
-# a WAN outage during getDailyRain() would otherwise stall activation past TimeoutStartSec
-# and put the unit into a restart loop at exactly the moment it should keep logging.
+# Serial port and BME280 are already open by this point, so the service is functional and
+# READY=1 is honest. It used to matter that this came BEFORE getDailyRain(), because under
+# Type=notify a WAN outage there would stall activation past TimeoutStartSec and restart-loop
+# the unit at exactly the moment it should have kept logging. Item 37 removed that call, so
+# startup no longer touches the network at all; the ordering is kept because nothing after
+# this point is a precondition for the service being usable.
 # No-ops when NOTIFY_SOCKET is unset, so running this script by hand is unaffected.
 systemd_notifier = sdnotify.SystemdNotifier()
 systemd_notifier.notify("READY=1")
@@ -592,19 +644,13 @@ logFile(True, "Errors", "")
 
 # Set to zero, weatherStation class initially sets these to -100 for No Data yet
 suntec.windGust = 0.0
-suntec.rainToday = 0.0
 
-# Get daily rain data from weather station
-newRainToday = WU_download.getDailyRain()  # getDailyRain returns a list [0] = success/failure, [1] error message
-if newRainToday[0] >= 0:
-    print('Suntec station daily rain={}'.format(newRainToday[0]))
-    suntec.rainToday = newRainToday[0]
-else:
-    errMsg = "getDailyRain() error:"
-    print("{} {}    {}".format(errMsg, newRainToday[1], time.strftime("%m/%d/%Y %I:%M:%S %p")))
-    
+# Restore today's rain accumulation from local state (item 37). Works with the WAN down.
+suntec.rainToday = load_rain_state()
+print('Daily rain restored from local state: {:.2f}"'.format(suntec.rainToday))
 
-# Get pressure from other nearby weather stations
+
+# Get pressure from the BME280
 newPressure = getAtmosphericPressure()
 if newPressure > MIN_VALID_PRESSURE_INHG:
    suntec.pressure = newPressure
@@ -762,6 +808,7 @@ try:
         if newDayOfMonth != g_oldDayOfMonth:
             suntec.rainToday = 0.0
             g_oldDayOfMonth = newDayOfMonth
+            save_rain_state()  # keep the stored total and its date in step with the reset
 
             # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
             logFile(True, "Data",   "")
