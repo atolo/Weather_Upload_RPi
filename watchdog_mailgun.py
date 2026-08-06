@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -124,6 +125,30 @@ def format_age(now, timestamp):
     return f"{int(now - timestamp)}s"
 
 
+def redact(text):
+    """The status file is untrusted input to the alerting path: it is written by another
+    process and its contents are interpolated into an email that leaves the network."""
+    return re.sub(r'(?i)(password=)[^&\s\'"]*', r'\1<redacted>', str(text))
+
+
+def describe_last_error(status, now):
+    """Report the last upload error only while it is plausibly related to the current
+    incident. Reporting it unconditionally sent investigators after a fault that had
+    already resolved -- observed live at 15.5 hours stale during healthy operation."""
+    error_text = status.get("last_upload_error")
+    if not error_text:
+        return "none recorded"
+
+    error_at = status.get("last_upload_error_at")
+    if not isinstance(error_at, (int, float)):
+        return f"{redact(error_text)} (age unknown)"
+
+    if (now - error_at) > STALE_UPLOAD_SECONDS:
+        return f"none recent (last was {redact(error_text)}, {format_age(now, error_at)} ago)"
+
+    return f"{redact(error_text)} ({format_age(now, error_at)} ago)"
+
+
 def send_mailgun_email(subject, body):
     if not (MAILGUN_API_KEY and MAILGUN_DOMAIN and MAILGUN_FROM and MAILGUN_TO):
         print("Mailgun is not configured; skipping email send")
@@ -199,7 +224,7 @@ def main():
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
         should_alert = (now - float(state.get("last_alert_at", 0))) >= ALERT_COOLDOWN_SECONDS
         issue_text = "; ".join(issues)
-        last_error = status.get("last_upload_error", "none")
+        last_error = describe_last_error(status, now)
 
         subject = f"Weather station watchdog alert on {hostname}"
         body = (

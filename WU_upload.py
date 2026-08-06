@@ -2,9 +2,18 @@
 # https://www.wunderground.com/weather/api/d/docs?d=data/conditions
 
 
+import re
 import requests        # Allows you to send HTTP/1.1 requests
 import WU_credentials  # Weather underground password, station IDs and API key
 import weatherData_cls # class to hold weather data for the Davis ISS station
+
+
+def redact(text):
+    """Strip PASSWORD= from anything headed for a log, the status file, or an alert email.
+    requests/urllib3 exception messages frequently embed the full request URL, and the WU
+    realtime protocol requires the password to be a query parameter."""
+    return re.sub(r'(?i)(password=)[^&\s\'"]*', r'\1<redacted>', str(text))
+
 
 # This function uploads the weather data to Weather Underground
 # weatherData parameter is an instance of the weatherStation class in weather_Data_cls.py
@@ -39,11 +48,10 @@ def upload2WU(weatherData, stationID, uploadFreq=5):
         full_URL = full_URL + '&dewptf={:.1f}'.format(weatherData.dewPoint)
     if weatherData.gotHumidityData():
         full_URL = full_URL + '&humidity={:.1f}'.format(weatherData.humidity)
-    if weatherData.gotWindChillData():
-        full_URL = full_URL + '&windchill_f={:.1f}'.format(weatherData.windChill)
 
-    # print(full_URL)  # srg debug
-    
+    # Item 14: WU has no wind chill field -- neither windchillf nor windchill_f appears in the
+    # PWS protocol field list. It derives wind chill from temperature and wind speed.
+
     full_URL = full_URL + WU_software + WU_action
 
     try:
@@ -54,7 +62,7 @@ def upload2WU(weatherData, stationID, uploadFreq=5):
             return([True, "No Errors"])
 
         else:
-            uploadErrMsg = "HTTP Response:{},  {}".format(r.status_code, r.text)
+            uploadErrMsg = "HTTP Response:{},  {}".format(r.status_code, redact(r.text))
             return([False, uploadErrMsg])
         
     # Info on requests errors:
@@ -84,5 +92,5 @@ def upload2WU(weatherData, stationID, uploadFreq=5):
         return([False, uploadErrMsg])
 
     except Exception as e:
-        uploadErrMsg = f"Unexpected error: {e}"
+        uploadErrMsg = f"Unexpected error: {redact(e)}"
         return([False, uploadErrMsg])

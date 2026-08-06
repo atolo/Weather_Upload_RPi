@@ -516,6 +516,10 @@ def write_watchdog_status(last_upload=None, last_error=None):
 
         if last_upload is not None:
             status["last_successful_upload"] = last_upload
+            # Item 34: the error fields described the last error EVER seen, so an alert during a
+            # fresh incident would report a resolved fault from hours earlier.
+            status.pop("last_upload_error", None)
+            status.pop("last_upload_error_at", None)
 
         if last_error is not None:
             status["last_upload_error"] = last_error
