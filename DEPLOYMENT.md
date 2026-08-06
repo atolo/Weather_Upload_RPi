@@ -354,7 +354,22 @@ public page a day later.
 sudo -l -U pi | grep -A3 NOPASSWD
 ```
 
-Must list exactly the two `systemctl` commands. Then confirm the watchdog is no longer root:
+Must list the two `systemctl` commands. **Look at what else is listed.** Raspberry Pi OS ships
+`/etc/sudoers.d/010_pi-nopasswd` granting `pi` passwordless root for everything, and on the
+production Pi it appears twice. While that rule exists, running the watchdog as `pi` removes its
+*ambient* root — a bug in it no longer starts privileged — but restricts nothing it chooses to do.
+
+Removing the blanket rule makes the narrow grants meaningful. Check there is a password to fall back
+on first, or you will have no route to root at all:
+
+```bash
+sudo passwd -S pi
+```
+
+`P` means a password is set and it is safe to remove the blanket rule. `NP` or `L` means leave it
+alone until you set one.
+
+Then confirm the watchdog is no longer root:
 
 ```bash
 systemctl show weather-watchdog.service -p User -p Group
