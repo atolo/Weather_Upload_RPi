@@ -3,12 +3,51 @@
 # It also has functions to calculate average wind direction and dew point
 
 import math
+import time
 
 class weatherStation:
 
     # class variables
     NO_DATA_YET = -100.0
     AVG_WIND_DIR_NUM_DATA_POINTS = 30
+
+    # Fields that represent an INSTANTANEOUS reading, and are therefore capable of going stale
+    # (AUDIT_PLAN item A3). Each is stamped with a wall-clock time whenever it is assigned.
+    #
+    # rainToday is deliberately absent: it is a cumulative daily total, not a reading. It only
+    # changes on a bucket tip, so on a dry day it would be hours "stale" while being perfectly
+    # correct, and dropping it from an upload would make the published daily rain jump to zero.
+    # stationID, windChill and the avgWindDir working state are not readings either.
+    TIMESTAMPED_FIELDS = frozenset({
+        "outsideTemp", "humidity", "pressure", "windSpeed",
+        "windGust", "windDir", "rainRate", "dewPoint",
+    })
+
+    def __setattr__(self, name, value):
+        """Stamp every reading with the time it arrived.
+
+        Done here rather than at the ~10 assignment sites in Weather_Station.decodeRawData
+        because that module cannot be imported off the Pi (issue A4), so changes to it cannot
+        be tested. This keeps the producer side completely untouched: `suntec.outsideTemp = x`
+        goes on working exactly as before and picks up a timestamp for free."""
+        super().__setattr__(name, value)
+        if name in weatherStation.TIMESTAMPED_FIELDS:
+            self.__dict__.setdefault("_stamps", {})[name] = time.time()
+
+    def reading_age(self, field, now=None):
+        """Seconds since `field` last received a value, or None if it never has."""
+        stamp = self.__dict__.get("_stamps", {}).get(field)
+        if stamp is None:
+            return None
+        return (time.time() if now is None else now) - stamp
+
+    def is_fresh(self, field, max_age, now=None):
+        """Whether `field` holds a reading recent enough to publish.
+
+        A field with no timestamp has never been set, so it is never fresh. Untracked fields
+        are never fresh either -- callers must not gate on something that is not a reading."""
+        age = self.reading_age(field, now)
+        return age is not None and age <= max_age
 
     def __init__(self, stationID): # This function runs when the instance is created
 
@@ -34,8 +73,13 @@ class weatherStation:
         self.c             = 0    # counter
         self.sumNorthSouth = 0.0 
         self.sumEastWest   = 0.0 
-        self.northSouth    = [0] * weatherStation.AVG_WIND_DIR_NUM_DATA_POINTS 
+        self.northSouth    = [0] * weatherStation.AVG_WIND_DIR_NUM_DATA_POINTS
         self.eastWest      = [0] * weatherStation.AVG_WIND_DIR_NUM_DATA_POINTS
+
+        # Discard the stamps produced by the initialisation above. Those assignments set the
+        # NO_DATA_YET sentinel, not readings, and leaving them stamped would make a station
+        # that has never heard from the ISS look freshly updated.
+        self.__dict__["_stamps"] = {}
 
         
         

@@ -2,9 +2,12 @@
 
 `WU_credentials` is gitignored and present only on the station, and nothing here should be
 making real HTTP requests, so both are replaced with stubs before any test module imports the
-code under test. Doing it here rather than in each test file means the stubs are defined once
-and are consistent -- a stub that is missing an attribute the module touches at import time
-shows up as a collection error, not a test failure.
+code under test. `weatherData_cls` is deliberately NOT stubbed -- it is pure Python and imports
+anywhere, and stubbing it would shadow the real class from its own tests.
+
+Doing this here rather than in each test file means the stubs are defined once and stay
+consistent -- a stub missing an attribute that a module touches at import time then shows up as
+a collection error rather than a confusing test failure.
 """
 
 import os
@@ -38,6 +41,8 @@ def _install_stub(name, **attributes):
     return module
 
 
-_install_stub("WU_credentials")
-_install_stub("weatherData_cls")
+_install_stub("WU_credentials",
+               WU_PASSWORD="test-pws-key",
+               WU_STATION_ID_SUNTEC="KTEST1",
+               WU_API_KEY="test-api-key")
 _install_stub("requests", Session=_StubSession, exceptions=_stub_exceptions())
