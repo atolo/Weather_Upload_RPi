@@ -4,12 +4,16 @@
     ./venv/bin/python tools/wu_history.py --from "05:00 PM" --to "06:00 PM"
     ./venv/bin/python tools/wu_history.py --date 260806 --gaps
 
-AUDIT_PLAN stage R0. The station's web table is aggregated and may be cached, so "not on the
-page" is not the same as "not stored". This asks the API directly.
+AUDIT_PLAN stage R0. Written to answer "did WU actually keep that observation?", since an
+HTTP 200 from the upload endpoint means *accepted*, which is not the same as *retained*.
 
-The distinction matters for R5: an HTTP 200 from the upload endpoint means the observation was
-*accepted*, which is not the same as *retained*. If a backdated observation is accepted but
-never appears here, WU is discarding it -- and the backfill window is the answer.
+**This API lags the website.** Observed 2026-08-06 20:10: the station page showed rows through
+8:09 PM while this endpoint returned nothing after 7:29 PM -- roughly 40 minutes behind, and
+missing rows the page already had. So "absent here" is NOT evidence of "discarded" for anything
+recent. Use the station's own history page for recent data, or wait out the lag.
+
+Kept as a diagnostic. The question it was built for is closed: backdated uploads are discarded
+regardless of age, and R5 was cancelled as a result -- see AUDIT_PLAN.
 
 Endpoint:
   https://api.weather.com/v2/pws/history/all?stationId=..&format=json&units=e&date=YYYYMMDD&apiKey=..
